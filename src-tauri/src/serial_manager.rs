@@ -173,7 +173,7 @@ fn reconnect_loop(
                         reconnecting.store(false, Ordering::SeqCst);
                         running.store(true, Ordering::SeqCst);
 
-                        app.emit("serial-reconnected", ()).ok();
+                        app.emit("serial-reconnected", params.port_name.clone()).ok();
 
                         // Restart the read thread with fresh state
                         spawn_read_thread(read_port, app, running, reconnecting, port_arc, active_port_arc, params);
@@ -189,11 +189,31 @@ fn reconnect_loop(
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
+#[derive(serde::Serialize)]
+pub struct SerialPortInfo {
+    port_name: String,
+    description: String,
+}
+
 #[tauri::command]
-pub fn list_ports() -> Result<Vec<String>, String> {
+pub fn list_ports() -> Result<Vec<SerialPortInfo>, String> {
     match serialport::available_ports() {
-        Ok(ports) => Ok(ports.into_iter().map(|p| p.port_name).collect()),
-        Err(e)    => Err(e.to_string()),
+        Ok(ports) => {
+            let result: Vec<SerialPortInfo> = ports.into_iter().map(|p| {
+                let description = match p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        format!("{} - {}", info.product.unwrap_or_else(|| "USB Device".to_string()),
+                                info.manufacturer.unwrap_or_else(|| "Unknown".to_string()))
+                    }
+                    serialport::SerialPortType::PciPort => "PCI Port".to_string(),
+                    serialport::SerialPortType::BluetoothPort => "Bluetooth Port".to_string(),
+                    serialport::SerialPortType::Unknown => "Unknown Device".to_string(),
+                };
+                SerialPortInfo { port_name: p.port_name, description }
+            }).collect();
+            Ok(result)
+        }
+        Err(e) => Err(e.to_string()),
     }
 }
 

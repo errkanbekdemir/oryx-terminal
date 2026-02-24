@@ -9,6 +9,7 @@ export interface Macro {
     name: string;
     command: string; // The command string (supports \h, 0x, etc. as per Sender)
     color?: string;
+    hotkey?: number; // 1-9 for Ctrl+1 through Ctrl+9
 }
 
 interface MacroPanelProps {
@@ -40,6 +41,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
     const [editName, setEditName] = useState('');
     const [editCommand, setEditCommand] = useState('');
     const [editColor, setEditColor] = useState('blue');
+    const [editHotkey, setEditHotkey] = useState<number | undefined>(undefined);
     const [filterColor, setFilterColor] = useState<string | null>(null);
     const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
     const [importConfirm, setImportConfirm] = useState<{ macros: Macro[], count: number } | null>(null);
@@ -85,20 +87,31 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
     const handleSave = () => {
         if (!editName || !editCommand) return;
 
+        // Check for duplicate hotkey (excluding current macro being edited)
+        if (editHotkey !== undefined) {
+            const duplicate = macros.find(m => m.hotkey === editHotkey && m.id !== isEditing);
+            if (duplicate) {
+                // Clear hotkey from the duplicate macro
+                setMacros((prev: Macro[]) => prev.map((m: Macro) => m.id === duplicate.id ? { ...m, hotkey: undefined } : m));
+            }
+        }
+
         if (isEditing === 'new') {
             const newMacro: Macro = {
                 id: Date.now().toString(),
                 name: editName,
                 command: editCommand,
-                color: editColor
+                color: editColor,
+                hotkey: editHotkey
             };
             setMacros((prev: Macro[]) => [...prev, newMacro]);
         } else {
-            setMacros((prev: Macro[]) => prev.map((m: Macro) => m.id === isEditing ? { ...m, name: editName, command: editCommand, color: editColor } : m));
+            setMacros((prev: Macro[]) => prev.map((m: Macro) => m.id === isEditing ? { ...m, name: editName, command: editCommand, color: editColor, hotkey: editHotkey } : m));
         }
         setIsEditing(null);
         setEditName('');
         setEditCommand('');
+        setEditHotkey(undefined);
     };
 
     const handleDelete = (id: string) => {
@@ -170,11 +183,13 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
             setEditName(m.name);
             setEditCommand(m.command);
             setEditColor(m.color || 'blue');
+            setEditHotkey(m.hotkey);
         } else {
             setIsEditing('new');
             setEditName('');
             setEditCommand('');
             setEditColor('blue');
+            setEditHotkey(undefined);
         }
     };
     // Keep ref current every render so the oryx-add-macro handler always gets the latest closure
@@ -405,6 +420,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                         <div
                             key={m.id}
                             data-macro-id={m.id}
+                            data-macro-hotkey={m.hotkey || ''}
                             className={clsx(
                                 'group relative bg-white dark:bg-[#202124] rounded-md border shadow-sm transition-all overflow-hidden select-none',
                                 !isConnected && 'opacity-50',
@@ -418,6 +434,13 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                         >
                             {/* Vertical Accent Bar */}
                             <div className={`absolute left-0 top-0 bottom-0 w-[4px] ${getColorClass(m.color, 'accent')}`} />
+
+                            {/* Hotkey Badge */}
+                            {m.hotkey && (
+                                <div className="absolute top-1.5 right-2 px-1.5 py-0.5 bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/30 rounded text-[9px] font-bold text-blue-600 dark:text-blue-400 font-mono opacity-60 group-hover:opacity-100 transition-opacity pointer-events-none">
+                                    Ctrl+{m.hotkey}
+                                </div>
+                            )}
 
                             <div className="pl-2 pr-3 py-3 flex items-center gap-1.5 min-w-0">
                                 {/* Drag Handle */}
@@ -544,6 +567,46 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                                         />
                                     ))}
                                 </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-[10px] uppercase font-bold text-gray-400 mb-2 ml-1">Keyboard Shortcut</label>
+                                <div className="flex gap-1 p-1 bg-gray-100/50 dark:bg-black/20 rounded-lg w-fit">
+                                    <button
+                                        onClick={() => setEditHotkey(undefined)}
+                                        className={`px-2 py-1 text-[10px] font-bold rounded transition-all ${editHotkey === undefined ? 'bg-white dark:bg-[#2a2d33] text-blue-500 shadow-sm' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                                    >
+                                        None
+                                    </button>
+                                    {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => {
+                                        const isTaken = editHotkey !== n && macros.some(m => m.hotkey === n && m.id !== isEditing);
+                                        return (
+                                            <button
+                                                key={n}
+                                                onClick={() => setEditHotkey(n)}
+                                                className={clsx(
+                                                    'w-7 h-7 text-[10px] font-bold rounded transition-all relative',
+                                                    editHotkey === n
+                                                        ? 'bg-white dark:bg-[#2a2d33] text-blue-500 shadow-sm'
+                                                        : isTaken
+                                                            ? 'text-gray-300 dark:text-gray-600 line-through'
+                                                            : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                                                )}
+                                                title={isTaken ? `Already assigned (Ctrl+${n})` : `Ctrl+${n}`}
+                                            >
+                                                {n}
+                                                {isTaken && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-red-500 rounded-full" />}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                {editHotkey !== undefined && (
+                                    <p className="mt-1.5 text-[9px] text-blue-500 dark:text-blue-400 font-medium ml-1 flex items-center gap-1">
+                                        <kbd className="px-1 py-0.5 bg-blue-100 dark:bg-blue-900/30 rounded text-[8px]">Ctrl</kbd>
+                                        <span>+</span>
+                                        <kbd className="px-1 py-0.5 bg-blue-100 dark:bg-blue-900/30 rounded text-[8px]">{editHotkey}</kbd>
+                                    </p>
+                                )}
                             </div>
                         </div>
 

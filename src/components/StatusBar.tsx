@@ -173,10 +173,10 @@ export function StatusBar({
                 {/* Theme Toggle */}
                 <button
                     onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                    className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 text-gray-500 dark:text-gray-400 hover:text-amber-500 dark:hover:text-amber-400 transition-all active:rotate-12"
+                    className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 text-gray-500 dark:text-gray-400 hover:text-amber-500 dark:hover:text-amber-400 transition-all hover:rotate-12 active:rotate-45 duration-300"
                     title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
                 >
-                    {theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
+                    {theme === 'dark' ? <Moon size={14} className="transition-all duration-300 rotate-12" /> : <Sun size={14} className="transition-all duration-300 -rotate-12" />}
                 </button>
             </div>
         </div>

@@ -90,7 +90,9 @@ export function Sender({ isConnected, onSend }: SenderProps) {
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter') {
+        const key = e.key.toLowerCase();
+
+        if (key === 'enter') {
             e.preventDefault();
             handleSend(e.shiftKey);
             return;
@@ -99,7 +101,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
         const h = historyRef.current;
         if (h.length === 0) return;
 
-        if (e.key === 'ArrowUp') {
+        if (key === 'arrowup') {
             e.preventDefault();
             if (historyIndex === -1) {
                 // Save current draft before browsing
@@ -108,7 +110,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
             const next = Math.min(historyIndex + 1, h.length - 1);
             setHistoryIndex(next);
             setInput(h[next]);
-        } else if (e.key === 'ArrowDown') {
+        } else if (key === 'arrowdown') {
             e.preventDefault();
             if (historyIndex <= 0) {
                 // Back to draft
@@ -119,7 +121,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                 setHistoryIndex(next);
                 setInput(h[next]);
             }
-        } else if (e.key === 'Escape') {
+        } else if (key === 'escape') {
             setHistoryIndex(-1);
             setInput(draftRef.current);
         }
@@ -267,9 +269,6 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                             </div>
                         </>
                     )}
-                </div>
-                <div className="absolute right-0 -bottom-5 text-[9px] text-gray-400 dark:text-gray-500 opacity-0 group-hover/input:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                    Supports: \h(4F), \d(10), \b(01), 0x..., 0b..., \r, \n
                 </div>
             </div>
 

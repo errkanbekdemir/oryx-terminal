@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useMemo, memo } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import clsx from 'clsx';
-import { Copy, Trash, MousePointer2, Binary } from 'lucide-react';
+import { Copy, Trash, MousePointer2, Binary, Scissors, Send } from 'lucide-react';
 import { parseInput } from '../utils/parser';
 import { parseAnsi } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
@@ -25,6 +25,7 @@ interface TerminalProps {
     eolSequence: string;
     onClear: () => void;
     hasSeenAnsi: boolean;
+    onSendCommand?: (command: string) => Promise<boolean>;
 }
 
 function formatByte(b: number, mode: string): string {
@@ -98,7 +99,7 @@ function ByteTooltip({ data, idx, x, y, onClose }: { data: number[]; idx: number
     const char = b >= 32 && b <= 126 ? String.fromCharCode(b) : '·';
 
     // Flip left if near right edge
-    const tipWidth = 260;
+    const tipWidth = 320;
     const leftPos = x + 14 + tipWidth > window.innerWidth ? x - tipWidth - 4 : x + 14;
 
     const typeKeys: (keyof ByteInspectorConfig['types'])[] = ['uint8', 'int8', 'uint16', 'int16', 'uint32', 'int32', 'float32'];
@@ -142,9 +143,10 @@ function ByteTooltip({ data, idx, x, y, onClose }: { data: number[]; idx: number
             </div>
 
             {/* Always-shown: single byte formats */}
-            <div className="px-2.5 py-1.5 border-b border-white/10 grid grid-cols-2 gap-x-4 gap-y-0.5">
+            <div className="px-2.5 py-1.5 border-b border-white/10 grid grid-cols-3 gap-x-4 gap-y-0.5">
                 <Row label="IDX"  value={idx} />
                 <Row label="HEX"  value={b.toString(16).padStart(2, '0').toUpperCase()} />
+                <Row label="DEC"  value={b.toString(10)} />
                 <Row label="BIN"  value={b.toString(2).padStart(8, '0')} />
                 <Row label="OCT"  value={b.toString(8).padStart(3, '0')} />
                 <Row label="CHAR" value={char} />
@@ -184,10 +186,10 @@ function ByteTooltip({ data, idx, x, y, onClose }: { data: number[]; idx: number
 
 function Row({ label, value }: { label: string; value: string | number }) {
     return (
-        <>
+        <div className="flex items-center gap-2">
             <span className="text-gray-500 text-[9px] uppercase font-bold tracking-wider">{label}</span>
             <span className="text-gray-200">{String(value)}</span>
-        </>
+        </div>
     );
 }
 
@@ -224,6 +226,12 @@ interface TerminalRowProps {
     eolBytes: number[];
     hasSeenAnsi: boolean;
     inspectorEnabled: boolean;
+    autoScroll: boolean;
+    onToggleAutoScroll: () => void;
+    onToggleTimestamp: () => void;
+    onToggleInspector: () => void;
+    onClear: () => void;
+    onSendCommand: (command: string) => void;
 }
 
 const TerminalRow = memo(function TerminalRow({
@@ -234,9 +242,16 @@ const TerminalRow = memo(function TerminalRow({
     eolBytes,
     hasSeenAnsi,
     inspectorEnabled,
+    autoScroll,
+    onToggleAutoScroll,
+    onToggleTimestamp,
+    onToggleInspector,
+    onClear,
+    onSendCommand,
 }: TerminalRowProps) {
     const [selectedByteIdx, setSelectedByteIdx] = useState<number | null>(null);
     const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+    const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
 
     const isNonTextMode = viewMode !== 'text' && !!line.originalData && line.originalData.length > 0;
     const isByteMode = inspectorEnabled && isNonTextMode; // interactive per-byte spans
@@ -265,8 +280,31 @@ const TerminalRow = memo(function TerminalRow({
         }
     }
 
+    const handleRowContextMenu = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu({ x: e.clientX, y: e.clientY });
+    };
+
+    const copyLine = () => {
+        navigator.clipboard.writeText(line.text);
+    };
+
+    const copyLineWithTimestamp = () => {
+        navigator.clipboard.writeText(`${line.timestamp} ${line.text}`);
+    };
+
+    const copyLineAsHex = () => {
+        if (line.originalData) {
+            navigator.clipboard.writeText(formatData(line.originalData, 'hex'));
+        }
+    };
+
     return (
-        <div className={clsx("px-0 py-0.5 leading-tight break-all flex border-b border-gray-100 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 group", {
+        <>
+        <div
+            onContextMenu={handleRowContextMenu}
+            className={clsx("px-0 py-0.5 leading-tight break-all flex border-b border-gray-100 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 group", {
             // SIMPLE MODE (Green/Blue)
             "text-green-600 dark:text-green-400": isRx && !hasSeenAnsi && !lineHasAnsi,
             "text-blue-600 dark:text-blue-400": isTx && !hasSeenAnsi && !lineHasAnsi,
@@ -340,10 +378,48 @@ const TerminalRow = memo(function TerminalRow({
                 )}
             </span>
 
+            {/* Copy button - visible on hover */}
+            <div className="flex-shrink-0 px-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                <button
+                    onClick={(e) => { e.stopPropagation(); copyLine(); }}
+                    className="p-1 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
+                    title="Copy line"
+                >
+                    <Copy size={14} />
+                </button>
+                <button
+                    onClick={(e) => { e.stopPropagation(); onSendCommand(line.text); }}
+                    className="p-1 rounded text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
+                    title="Send as command"
+                >
+                    <Send size={12} />
+                </button>
+            </div>
+
             {selectedByteIdx !== null && line.originalData && (
                 <ByteTooltip data={line.originalData} idx={selectedByteIdx} x={tooltipPos.x} y={tooltipPos.y} onClose={() => setSelectedByteIdx(null)} />
             )}
         </div>
+
+        {contextMenu && (
+            <ContextMenu
+                x={contextMenu.x}
+                y={contextMenu.y}
+                onClose={() => setContextMenu(null)}
+                options={[
+                    { label: 'Copy Line', icon: Copy, onClick: copyLine },
+                    { label: 'Copy with Timestamp', icon: Copy, onClick: copyLineWithTimestamp },
+                    line.originalData && { label: 'Copy as Hex', icon: Scissors, onClick: copyLineAsHex },
+                    { separator: true },
+                    { label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll', icon: MousePointer2, onClick: onToggleAutoScroll },
+                    { label: showTimestamp ? 'Hide Timestamp' : 'Show Timestamp', icon: MousePointer2, onClick: onToggleTimestamp },
+                    { label: inspectorEnabled ? 'Disable Byte Inspector' : 'Enable Byte Inspector', icon: Binary, onClick: onToggleInspector },
+                    { separator: true },
+                    { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },
+                ].filter((opt: any) => opt !== undefined && opt !== true && (opt.separator || opt.label))}
+            />
+        )}
+        </>
     );
 });
 
@@ -359,7 +435,8 @@ export function Terminal({
     showEol,
     eolSequence,
     onClear,
-    hasSeenAnsi
+    hasSeenAnsi,
+    onSendCommand,
 }: TerminalProps) {
     const virtuosoRef = useRef<VirtuosoHandle>(null);
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
@@ -420,6 +497,16 @@ export function Terminal({
                         eolBytes={eolBytes}
                         hasSeenAnsi={hasSeenAnsi}
                         inspectorEnabled={inspectorEnabled}
+                        autoScroll={autoScroll}
+                        onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
+                        onToggleTimestamp={() => setShowTimestamp(!showTimestamp)}
+                        onToggleInspector={() => {
+                            const next = !inspectorEnabled;
+                            setInspectorEnabled(next);
+                            localStorage.setItem('oryx_byteInspectorEnabled', String(next));
+                        }}
+                        onClear={onClear}
+                        onSendCommand={(cmd) => onSendCommand?.(cmd)}
                     />
                 )}
                 style={{ height: '100%' }}

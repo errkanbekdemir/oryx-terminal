@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { X, Keyboard } from 'lucide-react';
+import type { Macro } from './MacroPanel';
 
 interface HelpOverlayProps {
     isOpen: boolean;
@@ -15,15 +16,38 @@ const SHORTCUTS: { keys: string[]; description: string }[] = [
     { keys: ['?'], description: 'Show this help overlay' },
 ];
 
+const getMacros = (): Macro[] => {
+    try {
+        const saved = localStorage.getItem('oryx_macros');
+        if (saved) {
+            const parsed: Macro[] = JSON.parse(saved);
+            return parsed || [];
+        }
+    } catch (e) {
+        console.error('Failed to load macros for help overlay:', e);
+    }
+    return [];
+};
+
 export function HelpOverlay({ isOpen, onClose }: HelpOverlayProps) {
+    const macroShortcuts = useMemo(() => {
+        const macros = getMacros();
+        return macros
+            .filter(m => m.hotkey !== undefined && m.hotkey >= 1 && m.hotkey <= 9)
+            .sort((a, b) => (a.hotkey || 0) - (b.hotkey || 0))
+            .map(m => ({ keys: ['Ctrl', String(m.hotkey)], description: `Run macro: ${m.name}` }));
+    }, [isOpen]); // Re-compute when overlay opens
+
     useEffect(() => {
         if (!isOpen) return;
-        const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+        const handler = (e: KeyboardEvent) => { if (e.key.toLowerCase() === 'escape') onClose(); };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
     }, [isOpen, onClose]);
 
     if (!isOpen) return null;
+
+    const allShortcuts = [...SHORTCUTS, ...macroShortcuts];
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -42,7 +66,31 @@ export function HelpOverlay({ isOpen, onClose }: HelpOverlayProps) {
                     </button>
                 </div>
 
-                <div className="p-5 space-y-0">
+                <div className="p-5 space-y-0 max-h-[60vh] overflow-y-auto">
+                    {macroShortcuts.length > 0 && (
+                        <div className="mb-4 pb-3 border-b border-gray-200 dark:border-[#303339]">
+                            <p className="text-[10px] uppercase font-bold text-blue-500 tracking-wider mb-2">Macro Shortcuts</p>
+                            {macroShortcuts.map(({ keys, description }) => (
+                                <div
+                                    key={keys[1]}
+                                    className="flex items-center justify-between py-1.5"
+                                >
+                                    <span className="text-xs text-gray-600 dark:text-gray-300">{description}</span>
+                                    <div className="flex items-center gap-1">
+                                        <kbd className="px-2 py-0.5 text-[10px] font-bold font-mono bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-blue-600 dark:text-blue-400 shadow-sm">
+                                            {keys[0]}
+                                        </kbd>
+                                        <span className="text-gray-400 text-[10px]">+</span>
+                                        <kbd className="px-2 py-0.5 text-[10px] font-bold font-mono bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-blue-600 dark:text-blue-400 shadow-sm">
+                                            {keys[1]}
+                                        </kbd>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    <p className="text-[10px] uppercase font-bold text-gray-500 tracking-wider mb-2">General Shortcuts</p>
                     {SHORTCUTS.map(({ keys, description }) => (
                         <div
                             key={description}

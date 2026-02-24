@@ -7,7 +7,7 @@ import { StatusBar } from './components/StatusBar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { Terminal, LogEntry } from './components/Terminal';
 import { Sender, parseInput } from './components/Sender';
-import { MacroPanel } from './components/MacroPanel';
+import { MacroPanel, Macro } from './components/MacroPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { HelpOverlay } from './components/HelpOverlay';
 import { useSettings } from './contexts/SettingsContext';
@@ -99,6 +99,9 @@ function App() {
   const autoReconnectRef = useRef(autoReconnect);
   const reconnectTimeoutSecRef = useRef(reconnectTimeoutSec);
 
+  // Connection ref for hotkey handler (avoids stale closure)
+  const isConnectedRef = useRef(isConnected);
+
   // Line breaking refs
   const breakModeRef = useRef(breakMode);
   const breakAfterBytesCountRef = useRef(breakAfterBytesCount);
@@ -130,6 +133,10 @@ function App() {
   useEffect(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
+
+  useEffect(() => {
+    isConnectedRef.current = isConnected;
+  }, [isConnected]);
 
   useEffect(() => {
     if (isLogging && !isLoggingRef.current && logPath) {
@@ -376,7 +383,7 @@ function App() {
       }, 1000);
     });
 
-    const unlistenReconnected = listen('serial-reconnected', () => {
+    const unlistenReconnected = listen<string>('serial-reconnected', (event) => {
       if (reconnectElapsedIntervalRef.current) {
         clearInterval(reconnectElapsedIntervalRef.current);
         reconnectElapsedIntervalRef.current = null;
@@ -384,6 +391,10 @@ function App() {
       setIsReconnecting(false);
       setReconnectElapsed(0);
       setIsConnected(true);
+      // Restore selected port after reconnect
+      if (event.payload) {
+        setSelectedPort(event.payload);
+      }
       addLog('[RECONNECTED] Successfully reconnected.', 'system');
     });
 
@@ -437,21 +448,19 @@ function App() {
     addLog('Logs cleared.', 'system');
   }, [addLog]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === 'l') {
-        e.preventDefault();
-        handleClear();
-      } else if (e.key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        const target = e.target as HTMLElement;
-        if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
-          setIsHelpOpen(true);
-        }
+  // Load macros from localStorage for hotkey detection
+  const getMacros = (): Macro[] => {
+    try {
+      const saved = localStorage.getItem('oryx_macros');
+      if (saved) {
+        const parsed: Macro[] = JSON.parse(saved);
+        return parsed || [];
       }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [handleClear]);
+    } catch (e) {
+      console.error('Failed to load macros for hotkey detection:', e);
+    }
+    return [];
+  };
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
 
@@ -482,8 +491,8 @@ function App() {
     } catch (e) { console.error(e); }
   };
 
-  const handleMacroRun = async (command: string): Promise<boolean> => {
-    if (!isConnected) {
+  const handleMacroRun = useCallback(async (command: string): Promise<boolean> => {
+    if (!isConnectedRef.current) {
       addLog('Cannot send: Not connected.', 'error');
       return false;
     }
@@ -500,7 +509,36 @@ function App() {
       addLog(`Failed to send macro: ${e}`, 'error');
       return false;
     }
-  };
+  }, [addLog]);
+
+  // ─── Keyboard shortcuts ───────────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (e.ctrlKey && key === 'l') {
+        e.preventDefault();
+        handleClear();
+      } else if (key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const target = e.target as HTMLElement;
+        if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
+          setIsHelpOpen(true);
+        }
+      } else if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+        // Check for macro hotkeys (Ctrl+1 through Ctrl+9)
+        const hotkeyNum = parseInt(key, 10);
+        if (hotkeyNum >= 1 && hotkeyNum <= 9) {
+          e.preventDefault();
+          const macros = getMacros();
+          const macro = macros.find(m => m.hotkey === hotkeyNum);
+          if (macro) {
+            handleMacroRun(macro.command);
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleClear, handleMacroRun]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-gray-100 dark:bg-[#1e1e1e] transition-colors duration-200 overflow-hidden">
@@ -527,6 +565,7 @@ function App() {
               eolSequence={eolSequence}
               onClear={handleClear}
               hasSeenAnsi={hasSeenAnsi}
+              onSendCommand={handleMacroRun}
             />
           </ErrorBoundary>
         </div>

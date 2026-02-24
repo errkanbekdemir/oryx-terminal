@@ -457,6 +457,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                     <Dropdown
                                         label="Max Timeout"
                                         value={reconnectTimeoutSec}
+                                        direction="up"
                                         options={[
                                             { label: 'Indefinitely', value: 0 },
                                             { label: '30 seconds', value: 30 },

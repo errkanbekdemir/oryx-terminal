@@ -1,15 +1,18 @@
 import { useRef, useEffect, useState } from 'react';
 import { LucideIcon } from 'lucide-react';
 
+interface ContextMenuOption {
+    label?: string;
+    icon?: LucideIcon;
+    onClick?: () => void;
+    variant?: 'default' | 'danger';
+    separator?: boolean;
+}
+
 interface ContextMenuProps {
     x: number;
     y: number;
-    options: {
-        label: string;
-        icon?: LucideIcon;
-        onClick: () => void;
-        variant?: 'default' | 'danger';
-    }[];
+    options: ContextMenuOption[];
     onClose: () => void;
 }
 
@@ -51,25 +54,30 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
     return (
         <div
             ref={menuRef}
-            className={`fixed z-[100] min-w-[180px] bg-white dark:bg-[#252526] border border-gray-200 dark:border-white/10 rounded-lg shadow-xl py-1 transition-opacity duration-75 ${measured ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+            className={`fixed z-[300] min-w-[180px] bg-white dark:bg-[#252526] border border-gray-200 dark:border-white/10 rounded-lg shadow-xl py-1 transition-opacity duration-75 ${measured ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
             style={{ left: adjustedPos.x, top: adjustedPos.y }}
         >
-            {options.map((opt) => (
-                <button
-                    key={opt.label}
-                    onClick={() => {
-                        opt.onClick();
-                        onClose();
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-1.5 text-sm transition-colors hover:bg-gray-100 dark:hover:bg-white/5 ${opt.variant === 'danger'
-                        ? 'text-red-500 hover:text-red-600'
-                        : 'text-gray-700 dark:text-gray-300'
-                        }`}
-                >
-                    {opt.icon && <opt.icon size={16} className="opacity-70" />}
-                    {opt.label}
-                </button>
-            ))}
+            {options.map((opt, idx) => {
+                if (opt.separator) {
+                    return <div key={`sep-${idx}`} className="h-px bg-gray-200 dark:bg-white/10 my-1 mx-2" />;
+                }
+                return (
+                    <button
+                        key={opt.label}
+                        onClick={() => {
+                            opt.onClick?.();
+                            onClose();
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-1.5 text-sm transition-colors hover:bg-gray-100 dark:hover:bg-white/5 ${opt.variant === 'danger'
+                            ? 'text-red-500 hover:text-red-600'
+                            : 'text-gray-700 dark:text-gray-300'
+                            }`}
+                    >
+                        {opt.icon && <opt.icon size={16} className="opacity-70" />}
+                        {opt.label}
+                    </button>
+                );
+            })}
         </div>
     );
 }
