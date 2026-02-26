@@ -409,14 +409,14 @@ const TerminalRow = memo(function TerminalRow({
                 options={[
                     { label: 'Copy Line', icon: Copy, onClick: copyLine },
                     { label: 'Copy with Timestamp', icon: Copy, onClick: copyLineWithTimestamp },
-                    line.originalData && { label: 'Copy as Hex', icon: Scissors, onClick: copyLineAsHex },
+                    ...(line.originalData ? [{ label: 'Copy as Hex', icon: Scissors, onClick: copyLineAsHex }] as const : []),
                     { separator: true },
                     { label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll', icon: MousePointer2, onClick: onToggleAutoScroll },
                     { label: showTimestamp ? 'Hide Timestamp' : 'Show Timestamp', icon: MousePointer2, onClick: onToggleTimestamp },
                     { label: inspectorEnabled ? 'Disable Byte Inspector' : 'Enable Byte Inspector', icon: Binary, onClick: onToggleInspector },
                     { separator: true },
                     { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },
-                ].filter((opt: any) => opt !== undefined && opt !== true && (opt.separator || opt.label))}
+                ]}
             />
         )}
         </>
