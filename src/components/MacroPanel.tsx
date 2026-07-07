@@ -4,16 +4,32 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import clsx from 'clsx';
 
+export type MacroLineEnding = 'None' | 'CR' | 'LF' | 'CRLF';
+
 export interface Macro {
     id: string;
     name: string;
     command: string; // The command string (supports \h, 0x, etc. as per Sender)
     color?: string;
     hotkey?: number; // 1-9 for Ctrl+1 through Ctrl+9
+    lineEnding?: MacroLineEnding; // appended on send; text macros default to CRLF
 }
 
+// Default for macros saved before lineEnding existed (and for imports without
+// it): binary-style commands and commands that already end with an explicit
+// ending escape keep their exact bytes; plain text gets CRLF.
+const inferLineEnding = (command: string): MacroLineEnding => {
+    if (/\\[hbdo]\(|\\x[0-9a-fA-F]/.test(command)) return 'None';
+    if (/(^|\s)0[xXbB][0-9a-fA-F]/.test(command)) return 'None';
+    if (/(\\r|\\n)$/.test(command)) return 'None';
+    return 'CRLF';
+};
+
+const withLineEndingDefaults = (list: Macro[]): Macro[] =>
+    list.map(m => m.lineEnding ? m : { ...m, lineEnding: inferLineEnding(m.command) });
+
 interface MacroPanelProps {
-    onRun: (command: string) => Promise<boolean>;
+    onRun: (command: string, lineEnding?: MacroLineEnding) => Promise<boolean>;
     isConnected: boolean;
 }
 
@@ -22,17 +38,17 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
         const saved = localStorage.getItem('oryx_macros');
         if (saved) {
             try {
-                return JSON.parse(saved);
+                return withLineEndingDefaults(JSON.parse(saved));
             } catch (e) {
                 console.error("Failed to load macros", e);
             }
         }
         // Defaults if nothing saved or error
-        return [
+        return withLineEndingDefaults([
             { id: '1', name: 'Ping', command: 'PING\r\n', color: 'blue' },
             { id: '2', name: 'Version', command: 'VER?\n', color: 'green' },
             { id: '3', name: 'Reset', command: '\h(AA 55 00)', color: 'red' },
-        ];
+        ]);
     });
     const [isEditing, setIsEditing] = useState<string | null>(null); // ID of macro being edited, or 'new'
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -42,6 +58,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
     const [editCommand, setEditCommand] = useState('');
     const [editColor, setEditColor] = useState('blue');
     const [editHotkey, setEditHotkey] = useState<number | undefined>(undefined);
+    const [editLineEnding, setEditLineEnding] = useState<MacroLineEnding>('CRLF');
     const [filterColor, setFilterColor] = useState<string | null>(null);
     const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
     const [importConfirm, setImportConfirm] = useState<{ macros: Macro[], count: number } | null>(null);
@@ -102,16 +119,18 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                 name: editName,
                 command: editCommand,
                 color: editColor,
-                hotkey: editHotkey
+                hotkey: editHotkey,
+                lineEnding: editLineEnding
             };
             setMacros((prev: Macro[]) => [...prev, newMacro]);
         } else {
-            setMacros((prev: Macro[]) => prev.map((m: Macro) => m.id === isEditing ? { ...m, name: editName, command: editCommand, color: editColor, hotkey: editHotkey } : m));
+            setMacros((prev: Macro[]) => prev.map((m: Macro) => m.id === isEditing ? { ...m, name: editName, command: editCommand, color: editColor, hotkey: editHotkey, lineEnding: editLineEnding } : m));
         }
         setIsEditing(null);
         setEditName('');
         setEditCommand('');
         setEditHotkey(undefined);
+        setEditLineEnding('CRLF');
     };
 
     const handleDelete = (id: string) => {
@@ -184,12 +203,14 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
             setEditCommand(m.command);
             setEditColor(m.color || 'blue');
             setEditHotkey(m.hotkey);
+            setEditLineEnding(m.lineEnding ?? inferLineEnding(m.command));
         } else {
             setIsEditing('new');
             setEditName('');
             setEditCommand('');
             setEditColor('blue');
             setEditHotkey(undefined);
+            setEditLineEnding('CRLF');
         }
     };
     // Keep ref current every render so the oryx-add-macro handler always gets the latest closure
@@ -242,11 +263,11 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
         return colorMap[c]?.[type] || colorMap['blue'][type];
     };
 
-    const runMacro = async (macroId: string, command: string) => {
-        const success = await onRun(command);
+    const runMacro = async (m: Macro) => {
+        const success = await onRun(m.command, m.lineEnding);
         if (!success) {
-            setSendFailedId(macroId);
-            setTimeout(() => setSendFailedId(prev => prev === macroId ? null : prev), 1000);
+            setSendFailedId(m.id);
+            setTimeout(() => setSendFailedId(prev => prev === m.id ? null : prev), 1000);
         }
     };
 
@@ -386,7 +407,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                         </span>
                         <div className="flex gap-1.5 flex-shrink-0">
                             <button
-                                onClick={() => { setMacros(importConfirm.macros); setImportConfirm(null); }}
+                                onClick={() => { setMacros(withLineEndingDefaults(importConfirm.macros)); setImportConfirm(null); }}
                                 className="px-3 py-1 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 transition-colors"
                             >
                                 Import
@@ -451,7 +472,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                                 >
                                     <GripVertical size={14} />
                                 </div>
-                                <div className={clsx('flex-grow min-w-0', isConnected ? 'cursor-pointer' : 'cursor-not-allowed')} onClick={() => isConnected && runMacro(m.id, m.command)}>
+                                <div className={clsx('flex-grow min-w-0', isConnected ? 'cursor-pointer' : 'cursor-not-allowed')} onClick={() => isConnected && runMacro(m)}>
                                     <div className="font-bold text-sm text-gray-900 dark:text-gray-100 truncate pr-16 mb-0.5">
                                         {m.name}
                                     </div>
@@ -482,7 +503,7 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                                     ) : (
                                         <>
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); runMacro(m.id, m.command); }}
+                                                onClick={(e) => { e.stopPropagation(); runMacro(m); }}
                                                 disabled={!isConnected}
                                                 className="text-blue-600 p-1.5 hover:bg-blue-50 dark:hover:bg-blue-900/40 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                                 title={isConnected ? 'Run macro' : 'Not connected'}
@@ -552,6 +573,22 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
                                     onChange={e => setEditCommand(e.target.value)}
                                 />
                                 <p className="mt-1 text-[9px] text-gray-500 italic ml-1">Supports: \h(FF), \d(10), \r, \n, etc.</p>
+                            </div>
+
+                            <div>
+                                <label className="block text-[10px] uppercase font-bold text-gray-400 mb-2 ml-1">Line Ending</label>
+                                <div className="flex gap-1 p-1 bg-gray-100/50 dark:bg-black/20 rounded-lg w-fit">
+                                    {(['None', 'CR', 'LF', 'CRLF'] as MacroLineEnding[]).map(le => (
+                                        <button
+                                            key={le}
+                                            onClick={() => setEditLineEnding(le)}
+                                            className={`px-2.5 py-1 text-[10px] font-bold rounded transition-all ${editLineEnding === le ? 'bg-white dark:bg-[#2a2d33] text-blue-500 shadow-sm' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                                        >
+                                            {le}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="mt-1 text-[9px] text-gray-500 italic ml-1">Appended when the macro is sent. Text commands default to CRLF.</p>
                             </div>
 
                             <div>

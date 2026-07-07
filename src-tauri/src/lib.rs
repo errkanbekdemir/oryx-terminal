@@ -14,6 +14,10 @@ pub fn run() {
             running:      Arc::new(AtomicBool::new(false)),
             reconnecting: Arc::new(AtomicBool::new(false)),
             active_port:  Arc::new(Mutex::new(None)),
+            flow_mode:    Arc::new(Mutex::new(serial_manager::FlowMode::None)),
+            rts:          Arc::new(AtomicBool::new(false)),
+            dtr:          Arc::new(AtomicBool::new(false)),
+            tx_paused:    Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             serial_manager::list_ports,
@@ -23,6 +27,9 @@ pub fn run() {
             serial_manager::log_to_file,
             serial_manager::get_connection_status,
             serial_manager::write_to_file,
+            serial_manager::set_rts,
+            serial_manager::set_dtr,
+            serial_manager::read_modem_lines,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

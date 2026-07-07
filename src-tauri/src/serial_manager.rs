@@ -13,6 +13,61 @@ pub struct SerialState {
     pub running: Arc<AtomicBool>,
     pub reconnecting: Arc<AtomicBool>,
     pub active_port: Arc<Mutex<Option<String>>>,
+    pub flow_mode: Arc<Mutex<FlowMode>>,
+    pub rts: Arc<AtomicBool>,
+    pub dtr: Arc<AtomicBool>,
+    pub tx_paused: Arc<AtomicBool>,
+}
+
+/// Desired RTS/DTR levels + XOFF gate, shared with the read/reconnect threads
+/// so line states survive auto-reconnect.
+#[derive(Clone)]
+pub struct LineCtl {
+    pub rts: Arc<AtomicBool>,
+    pub dtr: Arc<AtomicBool>,
+    pub tx_paused: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum FlowMode {
+    None,
+    Hardware,
+    Software,
+    /// Driver RTS/CTS + app-level XON/XOFF (the serialport crate cannot enable both natively)
+    Combined,
+    ManualHardware,
+    ManualSoftware,
+    ManualCombined,
+    /// Per TX: wait DCD clear, raise RTS, wait CTS, send, drop RTS
+    HalfDuplex,
+    /// RTS keys the transceiver direction: high during TX only
+    Rs485,
+}
+
+impl FlowMode {
+    fn driver_flow(self) -> serialport::FlowControl {
+        match self {
+            FlowMode::Hardware | FlowMode::Combined => serialport::FlowControl::Hardware,
+            FlowMode::Software => serialport::FlowControl::Software,
+            _ => serialport::FlowControl::None,
+        }
+    }
+    /// App scans RX for XOFF/XON and gates TX on it
+    fn soft_gated(self) -> bool {
+        matches!(self, FlowMode::Combined | FlowMode::ManualSoftware | FlowMode::ManualCombined)
+    }
+    /// TX waits for CTS high before sending
+    fn waits_cts(self) -> bool {
+        matches!(self, FlowMode::ManualHardware | FlowMode::ManualCombined)
+    }
+    /// RTS is asserted at open time to signal "ready to receive"
+    fn asserts_rts_on_open(self) -> bool {
+        matches!(self, FlowMode::ManualHardware | FlowMode::ManualCombined)
+    }
+    /// RTS is keyed per transmission and idles low
+    fn keys_rts(self) -> bool {
+        matches!(self, FlowMode::HalfDuplex | FlowMode::Rs485)
+    }
 }
 
 #[derive(Clone)]
@@ -59,12 +114,18 @@ fn parse_parity(v: &str) -> Result<serialport::Parity, String> {
     }
 }
 
-fn parse_flow_control(v: &str) -> Result<serialport::FlowControl, String> {
+fn parse_flow_mode(v: &str) -> Result<FlowMode, String> {
     match v.to_lowercase().as_str() {
-        "none"     => Ok(serialport::FlowControl::None),
-        "software" => Ok(serialport::FlowControl::Software),
-        "hardware" => Ok(serialport::FlowControl::Hardware),
-        _ => Err("Invalid flow control. Must be 'none', 'software', or 'hardware'".to_string()),
+        "none"            => Ok(FlowMode::None),
+        "software"        => Ok(FlowMode::Software),
+        "hardware"        => Ok(FlowMode::Hardware),
+        "combined"        => Ok(FlowMode::Combined),
+        "manual_hardware" => Ok(FlowMode::ManualHardware),
+        "manual_software" => Ok(FlowMode::ManualSoftware),
+        "manual_combined" => Ok(FlowMode::ManualCombined),
+        "half_duplex"     => Ok(FlowMode::HalfDuplex),
+        "rs485"           => Ok(FlowMode::Rs485),
+        _ => Err(format!("Invalid flow control mode: '{}'", v)),
     }
 }
 
@@ -72,16 +133,43 @@ fn open_serial(params: &RawParams) -> Result<Box<dyn SerialPort>, String> {
     let db = parse_data_bits(params.data_bits)?;
     let sb = parse_stop_bits(params.stop_bits)?;
     let pa = parse_parity(&params.parity)?;
-    let fc = parse_flow_control(&params.flow_control)?;
+    let mode = parse_flow_mode(&params.flow_control)?;
 
-    serialport::new(&params.port_name, params.baud_rate)
+    let port = serialport::new(&params.port_name, params.baud_rate)
         .timeout(Duration::from_millis(10))
         .data_bits(db)
         .stop_bits(sb)
         .parity(pa)
-        .flow_control(fc)
+        .flow_control(mode.driver_flow())
         .open()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Discard whatever the driver buffered while the port was closed —
+    // otherwise a (re)connect dumps the whole stale backlog into the terminal.
+    let _ = port.clear(serialport::ClearBuffer::Input);
+
+    Ok(port)
+}
+
+/// Apply DTR and RTS to a freshly opened port. Driver-managed RTS modes
+/// (Hardware/Combined) leave RTS alone; keyed modes idle it low; manual
+/// handshake modes assert it; otherwise the user's desired level is applied.
+fn apply_line_states(port: &mut Box<dyn SerialPort>, mode: FlowMode, lines: &LineCtl) {
+    let _ = port.write_data_terminal_ready(lines.dtr.load(Ordering::SeqCst));
+
+    if mode.driver_flow() == serialport::FlowControl::Hardware {
+        return;
+    }
+    let level = if mode.asserts_rts_on_open() {
+        lines.rts.store(true, Ordering::SeqCst);
+        true
+    } else if mode.keys_rts() {
+        lines.rts.store(false, Ordering::SeqCst);
+        false
+    } else {
+        lines.rts.load(Ordering::SeqCst)
+    };
+    let _ = port.write_request_to_send(level);
 }
 
 // ─── Read thread + Rust-side reconnect ───────────────────────────────────────
@@ -94,7 +182,12 @@ fn spawn_read_thread(
     port_arc: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
     active_port_arc: Arc<Mutex<Option<String>>>,
     params: RawParams,
+    lines: LineCtl,
 ) {
+    let soft_gated = parse_flow_mode(&params.flow_control)
+        .map(|m| m.soft_gated())
+        .unwrap_or(false);
+
     thread::spawn(move || {
         let mut buf = vec![0u8; 1000];
 
@@ -105,8 +198,26 @@ fn spawn_read_thread(
 
             match read_port.read(buf.as_mut_slice()) {
                 Ok(n) if n > 0 => {
-                    if app.emit("serial-data", Payload { data: buf[..n].to_vec() }).is_err() {
-                        break; // Window closed
+                    let chunk: Vec<u8> = if soft_gated {
+                        // Intercept flow-control bytes: XOFF pauses TX, XON resumes.
+                        // They are stripped from the displayed stream.
+                        let mut filtered = Vec::with_capacity(n);
+                        for &b in &buf[..n] {
+                            match b {
+                                0x13 => lines.tx_paused.store(true, Ordering::SeqCst),
+                                0x11 => lines.tx_paused.store(false, Ordering::SeqCst),
+                                _ => filtered.push(b),
+                            }
+                        }
+                        filtered
+                    } else {
+                        buf[..n].to_vec()
+                    };
+
+                    if !chunk.is_empty() {
+                        if app.emit("serial-data", Payload { data: chunk }).is_err() {
+                            break; // Window closed
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -133,7 +244,8 @@ fn spawn_read_thread(
                             let active_port_arc = active_port_arc.clone();
                             let params          = params.clone();
                             let app             = app.clone();
-                            move || reconnect_loop(reconnecting, running, port_arc, active_port_arc, params, app)
+                            let lines           = lines.clone();
+                            move || reconnect_loop(reconnecting, running, port_arc, active_port_arc, params, app, lines)
                         });
                     }
                     break;
@@ -150,6 +262,7 @@ fn reconnect_loop(
     active_port_arc: Arc<Mutex<Option<String>>>,
     params: RawParams,
     app: AppHandle,
+    lines: LineCtl,
 ) {
     loop {
         // Check for abort before sleeping
@@ -162,9 +275,14 @@ fn reconnect_loop(
 
         // Try to open the serial port directly — cheap single syscall
         match open_serial(&params) {
-            Ok(new_port) => {
+            Ok(mut new_port) => {
                 match new_port.try_clone() {
                     Ok(read_port) => {
+                        // Restore line states before the port goes live
+                        let mode = parse_flow_mode(&params.flow_control).unwrap_or(FlowMode::None);
+                        apply_line_states(&mut new_port, mode, &lines);
+                        lines.tx_paused.store(false, Ordering::SeqCst);
+
                         // Store the new port in shared state
                         if let Ok(mut g) = port_arc.lock() { *g = Some(new_port); }
                         if let Ok(mut g) = active_port_arc.lock() { *g = Some(params.port_name.clone()); }
@@ -176,7 +294,7 @@ fn reconnect_loop(
                         app.emit("serial-reconnected", params.port_name.clone()).ok();
 
                         // Restart the read thread with fresh state
-                        spawn_read_thread(read_port, app, running, reconnecting, port_arc, active_port_arc, params);
+                        spawn_read_thread(read_port, app, running, reconnecting, port_arc, active_port_arc, params, lines);
                         break;
                     }
                     Err(_) => { /* try_clone failed, keep looping */ }
@@ -235,8 +353,19 @@ pub fn open_port(
     }
 
     let params = RawParams { port_name: port_name.clone(), baud_rate, data_bits, stop_bits, parity, flow_control };
-    let port = open_serial(&params)?;
+    let mode = parse_flow_mode(&params.flow_control)?;
+    let mut port = open_serial(&params)?;
     let read_port = port.try_clone().map_err(|e| e.to_string())?;
+
+    let lines = LineCtl {
+        rts: state.rts.clone(),
+        dtr: state.dtr.clone(),
+        tx_paused: state.tx_paused.clone(),
+    };
+    apply_line_states(&mut port, mode, &lines);
+
+    *state.flow_mode.lock().map_err(|e| e.to_string())? = mode;
+    state.tx_paused.store(false, Ordering::SeqCst);
 
     *state.active_port.lock().map_err(|e| e.to_string())? = Some(port_name);
 
@@ -254,6 +383,7 @@ pub fn open_port(
         state.port.clone(),
         state.active_port.clone(),
         params,
+        lines,
     );
 
     Ok(())
@@ -267,6 +397,7 @@ pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
 
     *state.active_port.lock().map_err(|e| e.to_string())? = None;
     *state.port.lock().map_err(|e| e.to_string())? = None;
+    state.tx_paused.store(false, Ordering::SeqCst);
 
     Ok(())
 }
@@ -276,15 +407,103 @@ pub fn get_connection_status(state: State<'_, SerialState>) -> Result<Option<Str
     Ok(state.active_port.lock().map_err(|e| e.to_string())?.clone())
 }
 
+/// Poll `cond` every 5 ms until it holds, or fail after 2 s with a clear
+/// flow-control error instead of hanging the send.
+fn wait_until(mut cond: impl FnMut() -> bool, what: &str) -> Result<(), String> {
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    while !cond() {
+        if start.elapsed() > TIMEOUT {
+            return Err(format!("Flow control timeout: {}", what));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn send_data(data: Vec<u8>, state: State<'_, SerialState>) -> Result<(), String> {
+    let mode = *state.flow_mode.lock().map_err(|e| e.to_string())?;
+
+    // Software gate: a received XOFF pauses TX until the peer sends XON
+    if mode.soft_gated() {
+        let tx_paused = state.tx_paused.clone();
+        wait_until(|| !tx_paused.load(Ordering::SeqCst), "XOFF active, peer has paused TX")?;
+    }
+
+    let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    let port = port_guard.as_mut().ok_or_else(|| "No port open".to_string())?;
+
+    if mode.waits_cts() {
+        wait_until(|| port.read_clear_to_send().unwrap_or(false), "CTS not asserted")?;
+    }
+
+    match mode {
+        FlowMode::HalfDuplex => {
+            wait_until(|| !port.read_carrier_detect().unwrap_or(false), "carrier detected (DCD high)")?;
+            port.write_request_to_send(true).map_err(|e| e.to_string())?;
+            let handshake = wait_until(|| port.read_clear_to_send().unwrap_or(false), "CTS not asserted");
+            let result = handshake.and_then(|_| {
+                port.write_all(&data)
+                    .and_then(|_| port.flush())
+                    .map_err(|e| e.to_string())
+            });
+            let _ = port.write_request_to_send(false);
+            result
+        }
+        FlowMode::Rs485 => {
+            port.write_request_to_send(true).map_err(|e| e.to_string())?;
+            let result = port.write_all(&data)
+                .and_then(|_| port.flush()) // drain before releasing the bus
+                .map_err(|e| e.to_string());
+            let _ = port.write_request_to_send(false);
+            result
+        }
+        _ => port.write_all(&data).map_err(|e| e.to_string()),
+    }
+}
+
+// ─── Modem line control ──────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ModemLines {
+    cts: bool,
+    dsr: bool,
+    cd: bool,
+    ri: bool,
+}
+
+#[tauri::command]
+pub fn set_rts(level: bool, state: State<'_, SerialState>) -> Result<(), String> {
+    state.rts.store(level, Ordering::SeqCst);
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     if let Some(port) = port_guard.as_mut() {
-        port.write_all(&data).map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("No port open".to_string())
+        port.write_request_to_send(level).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_dtr(level: bool, state: State<'_, SerialState>) -> Result<(), String> {
+    state.dtr.store(level, Ordering::SeqCst);
+    let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    if let Some(port) = port_guard.as_mut() {
+        port.write_data_terminal_ready(level).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn read_modem_lines(state: State<'_, SerialState>) -> Result<ModemLines, String> {
+    let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    let port = port_guard.as_mut().ok_or_else(|| "No port open".to_string())?;
+    // Some adapters don't wire every line; report those as low instead of failing
+    Ok(ModemLines {
+        cts: port.read_clear_to_send().unwrap_or(false),
+        dsr: port.read_data_set_ready().unwrap_or(false),
+        cd:  port.read_carrier_detect().unwrap_or(false),
+        ri:  port.read_ring_indicator().unwrap_or(false),
+    })
 }
 
 #[tauri::command]

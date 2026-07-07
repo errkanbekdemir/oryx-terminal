@@ -1,6 +1,6 @@
 # Maintainer: Erkan Bekdemir <erkan@example.com>
 pkgname=oryx-serial-terminal
-pkgver=1.6.1
+pkgver=1.7.0
 pkgrel=1
 pkgdesc="Premium high-performance serial terminal built with Tauri and React"
 arch=('x86_64' 'aarch64')
@@ -8,7 +8,7 @@ url="https://github.com/errkanbekdemir/oryx-terminal"
 license=('MIT')
 depends=('gtk3' 'webkit2gtk-4.1' 'libsoup3' 'libnm')
 makedepends=('cargo' 'nodejs' 'npm')
-_tag="1.6.1"
+_tag="1.7.0"
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/errkanbekdemir/oryx-terminal/archive/refs/tags/v${_tag}.tar.gz")
 sha256sums=('SKIP') # Use 'makepkg -g' to generate
 

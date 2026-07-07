@@ -18,23 +18,30 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+# In-place sed differs between GNU (Linux / Windows Git Bash) and BSD (macOS)
+if sed --version >/dev/null 2>&1; then
+  sedi() { sed -i "$@"; }        # GNU sed
+else
+  sedi() { sed -i '' "$@"; }     # BSD/macOS sed
+fi
+
 echo "Bumping version to $VERSION..."
 
 # package.json
-sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" package.json
+sedi "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" package.json
 echo "  package.json          ✓"
 
 # src-tauri/tauri.conf.json
-sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+sedi "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
 echo "  tauri.conf.json       ✓"
 
 # src-tauri/Cargo.toml (only the [package] version line)
-sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+sedi "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
 echo "  Cargo.toml            ✓"
 
 # PKGBUILD — pkgver and _tag
-sed -i '' "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
-sed -i '' "s/^_tag=.*/\_tag=\"$VERSION\"/" PKGBUILD
+sedi "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+sedi "s/^_tag=.*/\_tag=\"$VERSION\"/" PKGBUILD
 echo "  PKGBUILD              ✓"
 
 echo ""

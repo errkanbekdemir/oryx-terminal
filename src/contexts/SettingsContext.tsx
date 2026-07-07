@@ -18,6 +18,7 @@ interface SettingsContextType {
     macroWidth: number; setMacroWidth: (v: number) => void;
     showTimestamp: boolean; setShowTimestamp: (v: boolean) => void;
     showEol: boolean; setShowEol: (v: boolean) => void;
+    maxLines: number; setMaxLines: (v: number) => void;
     // Line breaking
     eolSequence: string; setEolSequence: (v: string) => void;
     breakMode: BreakMode; setBreakMode: (v: BreakMode) => void;
@@ -55,6 +56,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [macroWidth, setMacroWidth] = useState(getSaved('oryx_macroWidth', 256));
     const [showTimestamp, setShowTimestamp] = useState(getSaved('oryx_showTimestamp', true));
     const [showEol, setShowEol] = useState(getSaved('oryx_showEol', false));
+    const [maxLines, setMaxLines] = useState(getSaved('oryx_maxLines', 10_000));
 
     const [eolSequence, setEolSequence] = useState(getSaved('oryx_eolSequence', '\\r\\n'));
     const [breakMode, setBreakMode] = useState<BreakMode>(getSaved('oryx_breakMode', 'beforeSequence'));
@@ -90,6 +92,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             oryx_macroWidth: macroWidth,
             oryx_showTimestamp: showTimestamp,
             oryx_showEol: showEol,
+            oryx_maxLines: maxLines,
             oryx_eolSequence: eolSequence,
             oryx_breakMode: breakMode,
             oryx_breakAfterBytesCount: breakAfterBytesCount,
@@ -107,12 +110,13 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         for (const [key, value] of Object.entries(settings)) {
             localStorage.setItem(key, JSON.stringify(value));
         }
-    }, [autoScroll, viewMode, showMacros, macroWidth, showTimestamp, showEol, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakAfterSequenceValue, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, selectedPort, autoReconnect, reconnectTimeoutSec]);
+    }, [autoScroll, viewMode, showMacros, macroWidth, showTimestamp, showEol, maxLines, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakAfterSequenceValue, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, selectedPort, autoReconnect, reconnectTimeoutSec]);
 
     const value: SettingsContextType = {
         viewMode, setViewMode, theme, setTheme,
         autoScroll, setAutoScroll, showMacros, setShowMacros,
         macroWidth, setMacroWidth, showTimestamp, setShowTimestamp, showEol, setShowEol,
+        maxLines, setMaxLines,
         eolSequence, setEolSequence, breakMode, setBreakMode,
         breakAfterBytesCount, setBreakAfterBytesCount,
         breakBeforeSequenceValue, setBreakBeforeSequenceValue,

@@ -19,6 +19,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         breakAfterSequenceValue, setBreakAfterSequenceValue,
         breakAfterTimeoutMs, setBreakAfterTimeoutMs,
         eolSequence, setEolSequence, showEol, setShowEol,
+        maxLines, setMaxLines,
         logPath, setLogPath, isLogging, setIsLogging,
         autoReconnect, setAutoReconnect, reconnectTimeoutSec, setReconnectTimeoutSec,
     } = useSettings();
@@ -117,12 +118,21 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                 value={flowControl}
                                 options={[
                                     { label: 'None', value: 'None' },
-                                    { label: 'Software (Xon/Xoff)', value: 'Software' },
+                                    { label: 'Software (XOn/XOff)', value: 'Software' },
                                     { label: 'Hardware (RTS/CTS)', value: 'Hardware' },
+                                    { label: 'Combined (RTS/CTS + XOn/XOff)', value: 'combined' },
+                                    { label: 'Manual Hardware (RTS/CTS)', value: 'manual_hardware' },
+                                    { label: 'Manual Software (XOn/XOff)', value: 'manual_software' },
+                                    { label: 'Manual Combined (RTS/CTS + XOn/XOff)', value: 'manual_combined' },
+                                    { label: 'Half-Duplex Modem (DCD/RTS/CTS)', value: 'half_duplex' },
+                                    { label: 'RS-485 Transceiver Control (RTS)', value: 'rs485' },
                                 ]}
                                 onChange={setFlowControl}
                             />
                         </div>
+                        <p className="mt-2 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+                            Manual, half-duplex, and RS-485 modes gate TX in the app (CTS wait / XOFF pause / RTS keying). Applied on next connect.
+                        </p>
                     </section>
 
                     {/* Display Settings Section */}
@@ -189,6 +199,26 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                         </div>
                                     )}
                                 </div>
+                            </div>
+
+                            {/* Display Buffer Limit */}
+                            <div className="p-3 rounded-xl bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 space-y-3 shadow-sm">
+                                <div className="flex flex-col">
+                                    <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-gray-400 tracking-tight">Display Buffer Limit</span>
+                                    <p className="text-[9px] text-gray-400 dark:text-gray-500 italic mt-0.5">Maximum lines kept on screen — older lines are dropped (log files are unaffected)</p>
+                                </div>
+                                <Dropdown
+                                    label="Max Lines"
+                                    value={maxLines}
+                                    options={[
+                                        { label: '1,000 lines', value: 1_000 },
+                                        { label: '5,000 lines', value: 5_000 },
+                                        { label: '10,000 lines', value: 10_000 },
+                                        { label: '50,000 lines', value: 50_000 },
+                                        { label: '100,000 lines', value: 100_000 },
+                                    ]}
+                                    onChange={setMaxLines}
+                                />
                             </div>
 
                             {/* EOL Settings */}

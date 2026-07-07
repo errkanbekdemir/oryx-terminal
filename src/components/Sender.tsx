@@ -17,7 +17,10 @@ interface SenderProps {
 const HISTORY_MAX = 100;
 const HISTORY_KEY = 'oryx_sendHistory';
 const LINE_ENDING_KEY = 'oryx_lineEnding';
+const CUSTOM_LINE_ENDING_KEY = 'oryx_customLineEnding';
 const CHECKSUM_KEY = 'oryx_checksumType';
+
+type LineEnding = 'None' | 'CR' | 'LF' | 'CRLF' | 'Custom';
 
 function loadHistory(): string[] {
     try {
@@ -32,14 +35,27 @@ function saveHistory(h: string[]) {
 
 export function Sender({ isConnected, onSend }: SenderProps) {
     const [input, setInput] = useState('');
-    const [lineEnding, setLineEnding] = useState<'None' | 'CR' | 'LF' | 'CRLF'>(() => {
-        return (localStorage.getItem(LINE_ENDING_KEY) as 'None' | 'CR' | 'LF' | 'CRLF') ?? 'CRLF';
+    const [lineEnding, setLineEnding] = useState<LineEnding>(() => {
+        return (localStorage.getItem(LINE_ENDING_KEY) as LineEnding) ?? 'CRLF';
+    });
+    const [customEnding, setCustomEnding] = useState(() => {
+        return localStorage.getItem(CUSTOM_LINE_ENDING_KEY) ?? '\\r\\n';
     });
 
     // Persist lineEnding selection across sessions
     useEffect(() => {
         localStorage.setItem(LINE_ENDING_KEY, lineEnding);
     }, [lineEnding]);
+
+    useEffect(() => {
+        localStorage.setItem(CUSTOM_LINE_ENDING_KEY, customEnding);
+    }, [customEnding]);
+
+    // Validate the custom ending as the user types (same syntax as the command input)
+    const customEndingValid = (() => {
+        if (lineEnding !== 'Custom') return true;
+        try { parseInput(customEnding); return true; } catch { return false; }
+    })();
 
     const [checksumType, setChecksumType] = useState<ChecksumType>(() => {
         return (localStorage.getItem(CHECKSUM_KEY) as ChecksumType) ?? 'none';
@@ -75,6 +91,13 @@ export function Sender({ isConnected, onSend }: SenderProps) {
             if (lineEnding === 'CR')   dataBytes.push(13);
             if (lineEnding === 'LF')   dataBytes.push(10);
             if (lineEnding === 'CRLF') { dataBytes.push(13); dataBytes.push(10); }
+            if (lineEnding === 'Custom') {
+                try {
+                    dataBytes.push(...parseInput(customEnding));
+                } catch (e) {
+                    console.error('Invalid custom line ending, sending without it:', e);
+                }
+            }
         }
 
         try {
@@ -154,10 +177,30 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                     { label: 'CR (\\r)', value: 'CR' },
                     { label: 'LF (\\n)', value: 'LF' },
                     { label: 'CRLF', value: 'CRLF' },
+                    { label: 'Custom', value: 'Custom' },
                 ]}
                 onChange={setLineEnding}
                 direction="up"
             />
+
+            {lineEnding === 'Custom' && (
+                <div className="flex flex-col animate-in fade-in duration-150">
+                    <label className="text-[8px] uppercase font-bold text-gray-500 tracking-wider mb-0.5 ml-1">Ending</label>
+                    <input
+                        type="text"
+                        value={customEnding}
+                        onChange={(e) => setCustomEnding(e.target.value)}
+                        placeholder="\r\n"
+                        title="Custom line ending — supports \r, \n, \h(XX), 0x.. (same syntax as the command input)"
+                        className={clsx(
+                            "w-24 bg-gray-100 dark:bg-[#151515] border rounded px-2 py-2 text-xs font-mono text-gray-800 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-600 focus:outline-none focus:ring-1 shadow-inner transition-all",
+                            customEndingValid
+                                ? "border-gray-300 dark:border-gray-600 focus:border-blue-500 focus:ring-blue-500"
+                                : "border-red-400 dark:border-red-600 focus:border-red-500 focus:ring-red-500"
+                        )}
+                    />
+                </div>
+            )}
 
             <Dropdown
                 label="Checksum"

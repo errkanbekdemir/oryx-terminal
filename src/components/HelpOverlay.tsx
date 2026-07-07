@@ -13,6 +13,12 @@ const SHORTCUTS: { keys: string[]; description: string }[] = [
     { keys: ['↑', '↓'], description: 'Browse command history' },
     { keys: ['Esc'], description: 'Exit history browsing' },
     { keys: ['Ctrl', 'L'], description: 'Clear terminal' },
+    { keys: ['Click'], description: 'Select line (click the timestamp gutter)' },
+    { keys: ['Shift', 'Click'], description: 'Select range of lines' },
+    { keys: ['Ctrl', 'Click'], description: 'Add/remove line from selection' },
+    { keys: ['Ctrl', 'C'], description: 'Copy selected lines' },
+    { keys: ['Ctrl', 'Shift', 'C'], description: 'Copy selected lines (always)' },
+    { keys: ['Esc'], description: 'Clear line selection' },
     { keys: ['?'], description: 'Show this help overlay' },
 ];
 

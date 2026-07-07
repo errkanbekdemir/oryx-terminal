@@ -7,7 +7,7 @@ import { StatusBar } from './components/StatusBar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { Terminal, LogEntry } from './components/Terminal';
 import { Sender, parseInput } from './components/Sender';
-import { MacroPanel, Macro } from './components/MacroPanel';
+import { MacroPanel, Macro, MacroLineEnding } from './components/MacroPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { HelpOverlay } from './components/HelpOverlay';
 import { useSettings } from './contexts/SettingsContext';
@@ -58,7 +58,26 @@ function formatLogLine(type: 'rx' | 'tx', bytes: number[], viewMode: string): st
   return `[${getTimestamp()}] ${type.toUpperCase()}  ${formatted}\n`;
 }
 
-const MAX_LINES = 10_000;
+// Hard cap on raw RX bytes awaiting flush — beyond this the oldest bytes are
+// dropped so a stalled flush (e.g. slow log write) can't grow memory unbounded.
+const MAX_BUFFER = 1_048_576;
+
+// Auto-generated log filenames; user-chosen paths never match and are reused as-is
+const AUTO_LOG_RE = /^session_log_\d{8}_\d{6}\.txt$/;
+
+const generateLogPath = async (): Promise<string> => {
+  const docDir = await documentDir();
+  const now = new Date();
+  const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}_${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
+  return join(docDir, 'ORYX_Logs', `session_log_${timestamp}.txt`);
+};
+
+// Display buffer: lines + how many were trimmed off the front. `trimmed` feeds
+// Virtuoso's firstItemIndex so auto-scroll keeps working once the cap is hit.
+interface TerminalBuffer {
+  lines: LogEntry[];
+  trimmed: number;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,9 +90,11 @@ function App() {
     dataBits, stopBits, parity, flowControl,
     setSelectedPort, logPath, setLogPath,
     isLogging, setIsLogging, autoReconnect, reconnectTimeoutSec,
+    maxLines,
   } = useSettings();
 
-  const [lines, setLines] = useState<LogEntry[]>([]);
+  const [termBuf, setTermBuf] = useState<TerminalBuffer>({ lines: [], trimmed: 0 });
+  const lines = termBuf.lines;
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [reconnectElapsed, setReconnectElapsed] = useState(0);
@@ -102,6 +123,10 @@ function App() {
   // Connection ref for hotkey handler (avoids stale closure)
   const isConnectedRef = useRef(isConnected);
 
+  // Display limit ref (hot-path access from addLog)
+  const maxLinesRef = useRef(maxLines);
+  useEffect(() => { maxLinesRef.current = maxLines; }, [maxLines]);
+
   // Line breaking refs
   const breakModeRef = useRef(breakMode);
   const breakAfterBytesCountRef = useRef(breakAfterBytesCount);
@@ -116,11 +141,7 @@ function App() {
     if (logPath) return;
     const init = async () => {
       try {
-        const docDir = await documentDir();
-        const now = new Date();
-        const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}_${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
-        const defaultPath = await join(docDir, 'ORYX_Logs', `session_log_${timestamp}.txt`);
-        setLogPath(defaultPath);
+        setLogPath(await generateLogPath());
       } catch (e) {
         console.error('Failed to resolve default log path:', e);
         setLogPath('session_log.txt');
@@ -139,13 +160,38 @@ function App() {
   }, [isConnected]);
 
   useEffect(() => {
-    if (isLogging && !isLoggingRef.current && logPath) {
-      const header = `\n--- Logging started at ${new Date().toLocaleString()} ---\n`;
-      const encoded = Array.from(new TextEncoder().encode(header));
-      invoke('log_to_file', { path: logPath, data: encoded }).catch(e => console.error('Failed to write log header:', e));
+    const wasLogging = isLoggingRef.current;
+    if (isLogging && !wasLogging) {
+      // Each logging session gets its own timestamped file. A custom path the
+      // user picked via Settings never matches AUTO_LOG_RE and is reused as-is.
+      const startLogging = async () => {
+        let path = logPath;
+        const basename = path ? path.replace(/^.*[\\/]/, '') : '';
+        if (!path || AUTO_LOG_RE.test(basename)) {
+          try {
+            logPathRef.current = ''; // don't append to the previous session's file meanwhile
+            path = await generateLogPath();
+            logPathRef.current = path;
+            setLogPath(path);
+          } catch (e) {
+            console.error('Failed to generate log path:', e);
+            path = logPath;
+            logPathRef.current = path;
+          }
+        }
+        if (path) {
+          const header = `\n--- Logging started at ${new Date().toLocaleString()} ---\n`;
+          const encoded = Array.from(new TextEncoder().encode(header));
+          invoke('log_to_file', { path, data: encoded }).catch(e => console.error('Failed to write log header:', e));
+        }
+      };
+      startLogging();
     }
     isLoggingRef.current = isLogging;
-    logPathRef.current = logPath;
+    if (!(isLogging && !wasLogging)) {
+      // Skip during session start: startLogging owns the ref until the new path resolves
+      logPathRef.current = logPath;
+    }
     breakModeRef.current = breakMode;
     breakAfterBytesCountRef.current = breakAfterBytesCount;
     breakBeforeSequenceValueRef.current = breakBeforeSequenceValue;
@@ -175,9 +221,15 @@ function App() {
 
   const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]) => {
     if (text.includes('\x1b')) setHasSeenAnsi(true);
-    setLines(prev => {
-      const next = [...prev, { id: generateId(), timestamp: getTimestamp(), type, text, originalData }];
-      return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+    const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData };
+    setTermBuf(prev => {
+      const next = [...prev.lines, entry];
+      const max = maxLinesRef.current;
+      if (next.length > max) {
+        const overflow = next.length - max;
+        return { lines: next.slice(overflow), trimmed: prev.trimmed + overflow };
+      }
+      return { lines: next, trimmed: prev.trimmed };
     });
   }, []);
 
@@ -345,7 +397,14 @@ function App() {
   // ─── Serial data listener ─────────────────────────────────────────────────
   useEffect(() => {
     const unlisten = listen<SerialPayload>('serial-data', (event) => {
-      bufferRef.current.push(...event.payload.data);
+      // Indexed loop, not push(...spread): a large payload as spread arguments
+      // overflows the call stack (RangeError) — the reconnect-burst crash.
+      const buf = bufferRef.current;
+      const data = event.payload.data;
+      for (let i = 0; i < data.length; i++) buf.push(data[i]);
+      if (buf.length > MAX_BUFFER) {
+        buf.splice(0, buf.length - MAX_BUFFER);
+      }
       lastReceiveTime.current = Date.now();
     });
     return () => { unlisten.then(f => f()); };
@@ -443,7 +502,8 @@ function App() {
 
   // ─── Global keyboard shortcuts ────────────────────────────────────────────
   const handleClear = useCallback(() => {
-    setLines([]);
+    // Fold the cleared lines into `trimmed` so Virtuoso's firstItemIndex stays monotonic
+    setTermBuf(prev => ({ lines: [], trimmed: prev.trimmed + prev.lines.length }));
     setHasSeenAnsi(false);
     addLog('Logs cleared.', 'system');
   }, [addLog]);
@@ -491,12 +551,15 @@ function App() {
     } catch (e) { console.error(e); }
   };
 
-  const handleMacroRun = useCallback(async (command: string): Promise<boolean> => {
+  const handleMacroRun = useCallback(async (command: string, lineEnding?: MacroLineEnding): Promise<boolean> => {
     if (!isConnectedRef.current) {
       addLog('Cannot send: Not connected.', 'error');
       return false;
     }
     const dataBytes = parseInput(command);
+    if (lineEnding === 'CR') dataBytes.push(13);
+    else if (lineEnding === 'LF') dataBytes.push(10);
+    else if (lineEnding === 'CRLF') dataBytes.push(13, 10);
     try {
       await invoke('send_data', { data: dataBytes });
       addLog(command, 'tx', dataBytes);
@@ -531,7 +594,7 @@ function App() {
           const macros = getMacros();
           const macro = macros.find(m => m.hotkey === hotkeyNum);
           if (macro) {
-            handleMacroRun(macro.command);
+            handleMacroRun(macro.command, macro.lineEnding);
           }
         }
       }
@@ -556,6 +619,7 @@ function App() {
           <ErrorBoundary label="Terminal">
             <Terminal
               lines={lines}
+              firstItemIndex={termBuf.trimmed}
               autoScroll={autoScroll}
               setAutoScroll={setAutoScroll}
               showTimestamp={showTimestamp}

@@ -1,6 +1,6 @@
 [package]
 name = "oryx"
-version = "1.6.1"
+version = "1.7.0"
 description = "Premium high-performance serial terminal built with Tauri and React"
 authors = ["errkanbekdemir"]
 edition = "2021"

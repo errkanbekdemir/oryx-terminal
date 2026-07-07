@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useMemo, memo } from 'react';
+import { useCallback, useEffect, useRef, useState, useMemo, memo } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import clsx from 'clsx';
-import { Copy, Trash, MousePointer2, Binary, Scissors, Send } from 'lucide-react';
+import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X } from 'lucide-react';
 import { parseInput } from '../utils/parser';
 import { parseAnsi } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
@@ -16,6 +16,8 @@ export interface LogEntry {
 
 interface TerminalProps {
     lines: LogEntry[];
+    /** Cumulative count of lines trimmed off the front (Virtuoso firstItemIndex) */
+    firstItemIndex: number;
     autoScroll: boolean;
     setAutoScroll: (auto: boolean) => void;
     showTimestamp: boolean;
@@ -227,6 +229,10 @@ interface TerminalRowProps {
     hasSeenAnsi: boolean;
     inspectorEnabled: boolean;
     autoScroll: boolean;
+    isSelected: boolean;
+    selectedCount: number;
+    onSelectLine: (id: string, mods: { ctrl: boolean; shift: boolean }) => void;
+    onCopySelected: (withTimestamps: boolean) => void;
     onToggleAutoScroll: () => void;
     onToggleTimestamp: () => void;
     onToggleInspector: () => void;
@@ -243,6 +249,10 @@ const TerminalRow = memo(function TerminalRow({
     hasSeenAnsi,
     inspectorEnabled,
     autoScroll,
+    isSelected,
+    selectedCount,
+    onSelectLine,
+    onCopySelected,
     onToggleAutoScroll,
     onToggleTimestamp,
     onToggleInspector,
@@ -313,9 +323,20 @@ const TerminalRow = memo(function TerminalRow({
             // System/Error always distinct
             "text-gray-600 dark:text-gray-400": line.type === 'system',
             "text-red-600 dark:text-red-400": line.type === 'error',
+            // Line selection highlight
+            "bg-blue-500/10 dark:bg-blue-500/15": isSelected,
         })}>
-            {/* Metadata Gutter (Timestamp + Direction) */}
-            <div className="flex items-center gap-2 px-2 bg-gray-50/5 dark:bg-white/[0.01] border-r border-gray-100 dark:border-white/5 select-none flex-shrink-0">
+            {/* Metadata Gutter (Timestamp + Direction) — click to select the line */}
+            <div
+                onClick={(e) => onSelectLine(line.id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
+                title="Click to select · Shift+Click range · Ctrl+Click toggle"
+                className={clsx(
+                    "flex items-center gap-2 px-2 bg-gray-50/5 dark:bg-white/[0.01] border-r select-none flex-shrink-0 cursor-pointer",
+                    isSelected
+                        ? "border-l-2 border-l-blue-500 border-r-gray-100 dark:border-r-white/5"
+                        : "border-l-2 border-l-transparent border-r-gray-100 dark:border-r-white/5"
+                )}
+            >
                 {showTimestamp && (
                     <span className="text-gray-600 dark:text-white text-xs w-[95px] flex-shrink-0 font-mono tracking-tight text-right pr-1 border-r border-gray-200/50 dark:border-white/10 mr-1 opacity-80">
                         {line.timestamp}
@@ -410,6 +431,10 @@ const TerminalRow = memo(function TerminalRow({
                     { label: 'Copy Line', icon: Copy, onClick: copyLine },
                     { label: 'Copy with Timestamp', icon: Copy, onClick: copyLineWithTimestamp },
                     ...(line.originalData ? [{ label: 'Copy as Hex', icon: Scissors, onClick: copyLineAsHex }] as const : []),
+                    ...(selectedCount > 0 ? [
+                        { label: `Copy Selected (${selectedCount})`, icon: Copy, onClick: () => onCopySelected(false) },
+                        { label: `Copy Selected with Timestamps`, icon: Copy, onClick: () => onCopySelected(true) },
+                    ] as const : []),
                     { separator: true },
                     { label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll', icon: MousePointer2, onClick: onToggleAutoScroll },
                     { label: showTimestamp ? 'Hide Timestamp' : 'Show Timestamp', icon: MousePointer2, onClick: onToggleTimestamp },
@@ -427,6 +452,7 @@ const TerminalRow = memo(function TerminalRow({
 
 export function Terminal({
     lines,
+    firstItemIndex,
     autoScroll,
     setAutoScroll,
     showTimestamp,
@@ -445,6 +471,110 @@ export function Terminal({
         return saved === null ? true : saved === 'true';
     });
 
+    // ─── Line selection (keyed by stable line id — survives trimming) ────────
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const anchorIdRef = useRef<string | null>(null);
+
+    const idToIndex = useMemo(() => {
+        const m = new Map<string, number>();
+        lines.forEach((l, i) => m.set(l.id, i));
+        return m;
+    }, [lines]);
+
+    // Refs so the selection callback stays referentially stable (keeps row memo effective)
+    const linesRef = useRef(lines);
+    linesRef.current = lines;
+    const idToIndexRef = useRef(idToIndex);
+    idToIndexRef.current = idToIndex;
+    const viewModeRef = useRef(viewMode);
+    viewModeRef.current = viewMode;
+
+    const handleSelectLine = useCallback((id: string, mods: { ctrl: boolean; shift: boolean }) => {
+        setSelectedIds(prev => {
+            const curLines = linesRef.current;
+            const indexMap = idToIndexRef.current;
+            const next = new Set(prev);
+            const anchor = anchorIdRef.current;
+            if (mods.shift && anchor !== null && indexMap.has(anchor) && indexMap.has(id)) {
+                const a = indexMap.get(anchor)!;
+                const b = indexMap.get(id)!;
+                const [lo, hi] = a <= b ? [a, b] : [b, a];
+                if (!mods.ctrl) next.clear();
+                for (let i = lo; i <= hi; i++) next.add(curLines[i].id);
+            } else if (mods.ctrl) {
+                if (next.has(id)) next.delete(id); else next.add(id);
+                anchorIdRef.current = id;
+            } else {
+                next.clear();
+                next.add(id);
+                anchorIdRef.current = id;
+            }
+            return next;
+        });
+    }, []);
+
+    // Prune ids whose lines were trimmed or cleared so the count stays honest
+    useEffect(() => {
+        setSelectedIds(prev => {
+            if (prev.size === 0) return prev;
+            let changed = false;
+            const next = new Set<string>();
+            for (const id of prev) {
+                if (idToIndex.has(id)) next.add(id); else changed = true;
+            }
+            return changed ? next : prev;
+        });
+    }, [idToIndex]);
+
+    const selectedIdsRef = useRef(selectedIds);
+    selectedIdsRef.current = selectedIds;
+
+    // Copy from the lines data (not the DOM) so off-screen virtualized rows are included
+    const copySelected = useCallback((withTimestamps = false) => {
+        const ids = selectedIdsRef.current;
+        if (ids.size === 0) return;
+        const mode = viewModeRef.current;
+        const text = linesRef.current
+            .filter(l => ids.has(l.id))
+            .map(l => {
+                const body = mode !== 'text' && l.originalData && l.originalData.length > 0
+                    ? formatData(l.originalData, mode)
+                    : l.text;
+                return withTimestamps ? `${l.timestamp} ${body}` : body;
+            })
+            .join('\n');
+        if (text) navigator.clipboard.writeText(text);
+    }, []);
+
+    // Keyboard: Ctrl+C copies selected lines (native text selection wins),
+    // Ctrl+Shift+C always copies selected lines, Escape clears the selection
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            const target = e.target as HTMLElement;
+            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+            if (e.key === 'Escape') {
+                setSelectedIds(prev => prev.size > 0 ? new Set<string>() : prev);
+                return;
+            }
+            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'c') {
+                if (e.shiftKey) {
+                    if (selectedIdsRef.current.size > 0) {
+                        e.preventDefault();
+                        copySelected(false);
+                    }
+                } else {
+                    const native = window.getSelection()?.toString();
+                    if (!native && selectedIdsRef.current.size > 0) {
+                        e.preventDefault();
+                        copySelected(false);
+                    }
+                }
+            }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [copySelected]);
+
     // Memoize EOL bytes — computed once when eolSequence changes, not per-line
     const eolBytes = useMemo(() => {
         try {
@@ -454,22 +584,27 @@ export function Terminal({
         }
     }, [eolSequence]);
 
-    // Force scroll to bottom when lines change if autoScroll is enabled
+    // Force scroll to bottom when new lines arrive if autoScroll is enabled.
+    // Depends on total-ever-appended (firstItemIndex + length), not length alone:
+    // once the display cap is reached, length stays constant while trimming —
+    // the old length-based dependency stopped firing and auto-scroll died.
+    const totalAppended = firstItemIndex + lines.length;
     useEffect(() => {
-        if (autoScroll && virtuosoRef.current) {
+        if (autoScroll && virtuosoRef.current && lines.length > 0) {
             virtuosoRef.current.scrollToIndex({
-                index: lines.length - 1,
+                index: firstItemIndex + lines.length - 1,
                 align: 'end',
                 behavior: 'auto'
             });
         }
-    }, [lines.length, autoScroll]);
+    }, [totalAppended, autoScroll]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         setContextMenu({ x: e.clientX, y: e.clientY });
     };
 
+    // Copies the native browser text selection (visible rows only)
     const handleCopy = () => {
         const selected = window.getSelection()?.toString();
         if (selected) {
@@ -486,8 +621,9 @@ export function Terminal({
                 ref={virtuosoRef}
                 data={lines}
                 totalCount={lines.length}
+                firstItemIndex={firstItemIndex}
                 followOutput={autoScroll ? "auto" : false}
-                initialTopMostItemIndex={lines.length - 1}
+                initialTopMostItemIndex={Math.max(0, firstItemIndex + lines.length - 1)}
                 itemContent={(_, line) => (
                     <TerminalRow
                         line={line}
@@ -498,6 +634,10 @@ export function Terminal({
                         hasSeenAnsi={hasSeenAnsi}
                         inspectorEnabled={inspectorEnabled}
                         autoScroll={autoScroll}
+                        isSelected={selectedIds.has(line.id)}
+                        selectedCount={selectedIds.size}
+                        onSelectLine={handleSelectLine}
+                        onCopySelected={copySelected}
                         onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
                         onToggleTimestamp={() => setShowTimestamp(!showTimestamp)}
                         onToggleInspector={() => {
@@ -512,13 +652,38 @@ export function Terminal({
                 style={{ height: '100%' }}
             />
 
+            {/* Floating copy affordance — visible whenever lines are selected */}
+            {selectedIds.size > 0 && (
+                <div className="absolute bottom-3 right-3 z-[50] flex items-center gap-0.5 bg-white/95 dark:bg-[#2b2d31]/95 backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg px-1.5 py-1">
+                    <button
+                        onClick={() => copySelected(false)}
+                        className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
+                        title="Copy selected lines (Ctrl+C / Ctrl+Shift+C)"
+                    >
+                        <Copy size={12} />
+                        Copy Selected ({selectedIds.size})
+                    </button>
+                    <button
+                        onClick={() => setSelectedIds(new Set())}
+                        className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded transition-colors"
+                        title="Clear selection (Esc)"
+                    >
+                        <X size={12} />
+                    </button>
+                </div>
+            )}
+
             {contextMenu && (
                 <ContextMenu
                     x={contextMenu.x}
                     y={contextMenu.y}
                     onClose={() => setContextMenu(null)}
                     options={[
-                        { label: 'Copy Selected', icon: Copy, onClick: handleCopy },
+                        ...(selectedIds.size > 0 ? [
+                            { label: `Copy Selected (${selectedIds.size})`, icon: Copy, onClick: () => copySelected(false) },
+                            { label: 'Copy Selected with Timestamps', icon: Copy, onClick: () => copySelected(true) },
+                        ] as const : []),
+                        { label: 'Copy Text Selection', icon: Copy, onClick: handleCopy },
                         { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },
                         {
                             label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll',
