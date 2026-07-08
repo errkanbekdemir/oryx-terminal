@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useMemo, memo } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import clsx from 'clsx';
-import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X } from 'lucide-react';
+import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock } from 'lucide-react';
 import { parseInput } from '../utils/parser';
 import { parseAnsi } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
@@ -231,6 +231,10 @@ interface TerminalRowProps {
     autoScroll: boolean;
     isSelected: boolean;
     selectedCount: number;
+    /** Last selection made by the user's own left-button drag/click — excludes
+     *  the word-under-cursor auto-selection some browsers perform when a
+     *  right-click opens a context menu over unselected text. */
+    confirmedSelectionRef: React.RefObject<string>;
     onSelectLine: (id: string, mods: { ctrl: boolean; shift: boolean }) => void;
     onCopySelected: (withTimestamps: boolean) => void;
     onToggleAutoScroll: () => void;
@@ -251,6 +255,7 @@ const TerminalRow = memo(function TerminalRow({
     autoScroll,
     isSelected,
     selectedCount,
+    confirmedSelectionRef,
     onSelectLine,
     onCopySelected,
     onToggleAutoScroll,
@@ -262,6 +267,8 @@ const TerminalRow = memo(function TerminalRow({
     const [selectedByteIdx, setSelectedByteIdx] = useState<number | null>(null);
     const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
+    // Snapshot of the confirmed selection at the moment of right-click
+    const [nativeSelection, setNativeSelection] = useState('');
 
     const isNonTextMode = viewMode !== 'text' && !!line.originalData && line.originalData.length > 0;
     const isByteMode = inspectorEnabled && isNonTextMode; // interactive per-byte spans
@@ -293,6 +300,7 @@ const TerminalRow = memo(function TerminalRow({
     const handleRowContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        setNativeSelection(confirmedSelectionRef.current);
         setContextMenu({ x: e.clientX, y: e.clientY });
     };
 
@@ -428,6 +436,9 @@ const TerminalRow = memo(function TerminalRow({
                 y={contextMenu.y}
                 onClose={() => setContextMenu(null)}
                 options={[
+                    ...(nativeSelection ? [
+                        { label: 'Copy Text Selection', icon: Copy, onClick: () => navigator.clipboard.writeText(nativeSelection) },
+                    ] as const : []),
                     { label: 'Copy Line', icon: Copy, onClick: copyLine },
                     { label: 'Copy with Timestamp', icon: Copy, onClick: copyLineWithTimestamp },
                     ...(line.originalData ? [{ label: 'Copy as Hex', icon: Scissors, onClick: copyLineAsHex }] as const : []),
@@ -529,6 +540,32 @@ export function Terminal({
     const selectedIdsRef = useRef(selectedIds);
     selectedIdsRef.current = selectedIds;
 
+    // ─── Confirmed native text selection ──────────────────────────────────────
+    // Chromium auto-selects the word under the cursor when a right-click opens
+    // a context menu over otherwise-unselected text. Left unguarded, that makes
+    // "Copy Text Selection" appear on every right-click even without an
+    // intentional drag/click selection. Track selection changes but only
+    // record ones made with the left button; a right-button mousedown always
+    // collapses the previous selection to '' though, so that signal still
+    // comes through.
+    const confirmedSelectionRef = useRef('');
+    const mouseButtonRef = useRef(0);
+    useEffect(() => {
+        const onMouseDown = (e: MouseEvent) => { mouseButtonRef.current = e.button; };
+        const onSelectionChange = () => {
+            const text = window.getSelection()?.toString() ?? '';
+            if (text === '' || mouseButtonRef.current !== 2) {
+                confirmedSelectionRef.current = text;
+            }
+        };
+        document.addEventListener('mousedown', onMouseDown, true);
+        document.addEventListener('selectionchange', onSelectionChange);
+        return () => {
+            document.removeEventListener('mousedown', onMouseDown, true);
+            document.removeEventListener('selectionchange', onSelectionChange);
+        };
+    }, []);
+
     // Copy from the lines data (not the DOM) so off-screen virtualized rows are included
     const copySelected = useCallback((withTimestamps = false) => {
         const ids = selectedIdsRef.current;
@@ -563,7 +600,7 @@ export function Terminal({
                         copySelected(false);
                     }
                 } else {
-                    const native = window.getSelection()?.toString();
+                    const native = confirmedSelectionRef.current;
                     if (!native && selectedIdsRef.current.size > 0) {
                         e.preventDefault();
                         copySelected(false);
@@ -604,9 +641,9 @@ export function Terminal({
         setContextMenu({ x: e.clientX, y: e.clientY });
     };
 
-    // Copies the native browser text selection (visible rows only)
+    // Copies the confirmed native browser text selection (visible rows only)
     const handleCopy = () => {
-        const selected = window.getSelection()?.toString();
+        const selected = confirmedSelectionRef.current;
         if (selected) {
             navigator.clipboard.writeText(selected);
         }
@@ -624,6 +661,12 @@ export function Terminal({
                 firstItemIndex={firstItemIndex}
                 followOutput={autoScroll ? "auto" : false}
                 initialTopMostItemIndex={Math.max(0, firstItemIndex + lines.length - 1)}
+                // Keep far more rows mounted above/below the viewport than Virtuoso's tiny
+                // default overscan. Native browser text selection dies the instant its DOM
+                // node unmounts, so this buys a much larger scroll range before an in-progress
+                // selection is destroyed. It's a mitigation, not a guarantee — for a selection
+                // that must survive arbitrary scrolling, use gutter-click line selection instead.
+                increaseViewportBy={{ top: 4000, bottom: 4000 }}
                 itemContent={(_, line) => (
                     <TerminalRow
                         line={line}
@@ -636,6 +679,7 @@ export function Terminal({
                         autoScroll={autoScroll}
                         isSelected={selectedIds.has(line.id)}
                         selectedCount={selectedIds.size}
+                        confirmedSelectionRef={confirmedSelectionRef}
                         onSelectLine={handleSelectLine}
                         onCopySelected={copySelected}
                         onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
@@ -664,6 +708,14 @@ export function Terminal({
                         Copy Selected ({selectedIds.size})
                     </button>
                     <button
+                        onClick={() => copySelected(true)}
+                        className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
+                        title="Copy selected lines with timestamps"
+                    >
+                        <Clock size={12} />
+                    </button>
+                    <div className="w-px h-3.5 bg-gray-200 dark:bg-gray-700 mx-0.5" />
+                    <button
                         onClick={() => setSelectedIds(new Set())}
                         className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded transition-colors"
                         title="Clear selection (Esc)"
@@ -683,7 +735,9 @@ export function Terminal({
                             { label: `Copy Selected (${selectedIds.size})`, icon: Copy, onClick: () => copySelected(false) },
                             { label: 'Copy Selected with Timestamps', icon: Copy, onClick: () => copySelected(true) },
                         ] as const : []),
-                        { label: 'Copy Text Selection', icon: Copy, onClick: handleCopy },
+                        ...(confirmedSelectionRef.current ? [
+                            { label: 'Copy Text Selection', icon: Copy, onClick: handleCopy },
+                        ] as const : []),
                         { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },
                         {
                             label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll',

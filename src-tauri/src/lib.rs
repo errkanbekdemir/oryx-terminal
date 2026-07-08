@@ -17,6 +17,8 @@ pub fn run() {
             flow_mode:    Arc::new(Mutex::new(serial_manager::FlowMode::None)),
             rts:          Arc::new(AtomicBool::new(false)),
             dtr:          Arc::new(AtomicBool::new(false)),
+            rts_touched:  Arc::new(AtomicBool::new(false)),
+            dtr_touched:  Arc::new(AtomicBool::new(false)),
             tx_paused:    Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![

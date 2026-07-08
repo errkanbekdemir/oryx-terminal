@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { LucideIcon } from 'lucide-react';
 
 interface ContextMenuOption {
@@ -51,10 +52,15 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
         }
     }, [x, y]);
 
-    return (
+    // Rendered via a portal straight into <body> — keeping the menu's DOM nodes
+    // out of the terminal's own subtree means they can never be swept into an
+    // existing text selection there (a Selection Range's boundary is expressed
+    // in terms of DOM tree position, so a sibling inserted into the selected
+    // subtree can visually inherit the highlight even though it's unrelated).
+    return createPortal(
         <div
             ref={menuRef}
-            className={`fixed z-[300] min-w-[180px] bg-white dark:bg-[#252526] border border-gray-200 dark:border-white/10 rounded-lg shadow-xl py-1 transition-opacity duration-75 ${measured ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+            className={`fixed z-[300] min-w-[180px] select-none bg-white dark:bg-[#252526] border border-gray-200 dark:border-white/10 rounded-lg shadow-xl py-1 transition-opacity duration-75 ${measured ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
             style={{ left: adjustedPos.x, top: adjustedPos.y }}
         >
             {options.map((opt, idx) => {
@@ -78,6 +84,7 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
                     </button>
                 );
             })}
-        </div>
+        </div>,
+        document.body
     );
 }

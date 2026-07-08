@@ -16,6 +16,13 @@ pub struct SerialState {
     pub flow_mode: Arc<Mutex<FlowMode>>,
     pub rts: Arc<AtomicBool>,
     pub dtr: Arc<AtomicBool>,
+    /// Set once the user manually toggles RTS/DTR via set_rts/set_dtr. Until
+    /// then, those lines are left at whatever the driver defaults them to —
+    /// forcing DTR low unconditionally on every open pulses many Arduino/ESP-
+    /// style boards' auto-reset circuit (DTR -> cap -> RESET), which for
+    /// native-USB boards can cascade into an endless reset/reconnect loop.
+    pub rts_touched: Arc<AtomicBool>,
+    pub dtr_touched: Arc<AtomicBool>,
     pub tx_paused: Arc<AtomicBool>,
 }
 
@@ -25,6 +32,8 @@ pub struct SerialState {
 pub struct LineCtl {
     pub rts: Arc<AtomicBool>,
     pub dtr: Arc<AtomicBool>,
+    pub rts_touched: Arc<AtomicBool>,
+    pub dtr_touched: Arc<AtomicBool>,
     pub tx_paused: Arc<AtomicBool>,
 }
 
@@ -151,25 +160,30 @@ fn open_serial(params: &RawParams) -> Result<Box<dyn SerialPort>, String> {
     Ok(port)
 }
 
-/// Apply DTR and RTS to a freshly opened port. Driver-managed RTS modes
-/// (Hardware/Combined) leave RTS alone; keyed modes idle it low; manual
-/// handshake modes assert it; otherwise the user's desired level is applied.
+/// Apply DTR and RTS to a freshly opened port. Lines the user has never
+/// manually touched are left alone entirely (no write call at all) so the
+/// driver's own default — which many boards rely on for correct boot
+/// behavior — is undisturbed. Driver-managed RTS modes (Hardware/Combined)
+/// leave RTS alone; keyed modes idle it low; manual handshake modes assert
+/// it; otherwise the user's desired level is applied only once touched.
 fn apply_line_states(port: &mut Box<dyn SerialPort>, mode: FlowMode, lines: &LineCtl) {
-    let _ = port.write_data_terminal_ready(lines.dtr.load(Ordering::SeqCst));
+    if lines.dtr_touched.load(Ordering::SeqCst) {
+        let _ = port.write_data_terminal_ready(lines.dtr.load(Ordering::SeqCst));
+    }
 
     if mode.driver_flow() == serialport::FlowControl::Hardware {
         return;
     }
-    let level = if mode.asserts_rts_on_open() {
+
+    if mode.asserts_rts_on_open() {
         lines.rts.store(true, Ordering::SeqCst);
-        true
+        let _ = port.write_request_to_send(true);
     } else if mode.keys_rts() {
         lines.rts.store(false, Ordering::SeqCst);
-        false
-    } else {
-        lines.rts.load(Ordering::SeqCst)
-    };
-    let _ = port.write_request_to_send(level);
+        let _ = port.write_request_to_send(false);
+    } else if lines.rts_touched.load(Ordering::SeqCst) {
+        let _ = port.write_request_to_send(lines.rts.load(Ordering::SeqCst));
+    }
 }
 
 // ─── Read thread + Rust-side reconnect ───────────────────────────────────────
@@ -360,6 +374,8 @@ pub fn open_port(
     let lines = LineCtl {
         rts: state.rts.clone(),
         dtr: state.dtr.clone(),
+        rts_touched: state.rts_touched.clone(),
+        dtr_touched: state.dtr_touched.clone(),
         tx_paused: state.tx_paused.clone(),
     };
     apply_line_states(&mut port, mode, &lines);
@@ -476,6 +492,7 @@ pub struct ModemLines {
 #[tauri::command]
 pub fn set_rts(level: bool, state: State<'_, SerialState>) -> Result<(), String> {
     state.rts.store(level, Ordering::SeqCst);
+    state.rts_touched.store(true, Ordering::SeqCst);
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     if let Some(port) = port_guard.as_mut() {
         port.write_request_to_send(level).map_err(|e| e.to_string())?;
@@ -486,6 +503,7 @@ pub fn set_rts(level: bool, state: State<'_, SerialState>) -> Result<(), String>
 #[tauri::command]
 pub fn set_dtr(level: bool, state: State<'_, SerialState>) -> Result<(), String> {
     state.dtr.store(level, Ordering::SeqCst);
+    state.dtr_touched.store(true, Ordering::SeqCst);
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     if let Some(port) = port_guard.as_mut() {
         port.write_data_terminal_ready(level).map_err(|e| e.to_string())?;
