@@ -1,6 +1,6 @@
 use tauri::Builder;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 mod serial_manager;
 
@@ -20,6 +20,15 @@ pub fn run() {
             rts_touched:  Arc::new(AtomicBool::new(false)),
             dtr_touched:  Arc::new(AtomicBool::new(false)),
             tx_paused:    Arc::new(AtomicBool::new(false)),
+            // FTDI/Silicon Labs/Prolific chips drive RTS#/DTR# active-low in
+            // hardware, so default to corrected polarity (see SettingsContext).
+            invert_rts:   Arc::new(AtomicBool::new(true)),
+            invert_dtr:   Arc::new(AtomicBool::new(true)),
+            invert_cts:   Arc::new(AtomicBool::new(true)),
+            invert_dsr:   Arc::new(AtomicBool::new(true)),
+            invert_cd:    Arc::new(AtomicBool::new(true)),
+            invert_ri:    Arc::new(AtomicBool::new(true)),
+            rs485_pre_delay_ms: Arc::new(AtomicU64::new(0)),
         })
         .invoke_handler(tauri::generate_handler![
             serial_manager::list_ports,
@@ -31,6 +40,14 @@ pub fn run() {
             serial_manager::write_to_file,
             serial_manager::set_rts,
             serial_manager::set_dtr,
+            serial_manager::set_flow_control,
+            serial_manager::set_invert_rts,
+            serial_manager::set_invert_dtr,
+            serial_manager::set_invert_cts,
+            serial_manager::set_invert_dsr,
+            serial_manager::set_invert_cd,
+            serial_manager::set_invert_ri,
+            serial_manager::set_rs485_pre_delay,
             serial_manager::read_modem_lines,
         ])
         .run(tauri::generate_context!())

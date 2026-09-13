@@ -4,7 +4,7 @@
 [![React](https://img.shields.io/badge/React-v19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Rust](https://img.shields.io/badge/Rust-v1.75+-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.7.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)]()
 
 **ORYX** is a premium, high-performance serial terminal designed for modern developers and engineers. Built with the speed of **Rust** and the flexibility of **React**, it offers a rock-solid cross-platform experience for all your serial communication needs.
 
@@ -17,15 +17,19 @@
 - 💎 **Premium UI**: Stunning design with glassmorphism, smooth animations, and handcrafted themes (Dark & Light).
 - 🚀 **High Performance**: Virtualized terminal view capable of handling massive data streams without breaking a sweat.
 - 🛠️ **Advanced Configuration**: Granular control over Baud Rate, Data Bits, Stop Bits, Parity, and Flow Control.
-- 🔀 **9 Flow Control Modes**: None, Hardware, Software, Combined (RTS/CTS + XOn/XOff), Manual Hardware/Software/Combined, Half-Duplex Modem Handshake, and RS-485 Transceiver Control.
+- ⌨️ **Type-In Port Selection**: Pick from auto-discovered ports or type a path directly — useful for virtual/loopback devices the OS doesn't enumerate as a registered serial port.
+- 🔀 **9 Flow Control Modes**: None, Hardware, Software, Combined (RTS/CTS + XOn/XOff), Manual Hardware/Software/Combined, Half-Duplex Modem Handshake, and RS-485 Transceiver Control — all apply live, no reconnect needed when switching modes.
 - 🎛️ **Manual Modem Line Control**: Toggle RTS/DTR by hand and watch live CTS/DSR/DCD/RI indicators in the status bar. Levels are re-applied automatically after an auto-reconnect.
+- 🔧 **Per-Line Signal Inversion**: Invert RTS/DTR/CTS/DSR/DCD/RI independently to correct the active-low behavior common to FTDI, Silicon Labs, and Prolific USB-serial chips — on by default so the status bar matches your multimeter.
+- ⏱️ **RS-485 Pre-TX Delay**: Configurable wait after driving RTS/DE high, before data goes out, to match your transceiver's turn-on time.
+- 🎨 **ANSI Color Support**: Renders standard ANSI SGR escape codes (foreground/background colors, bold, underline) directly in the terminal view.
 - 📟 **Smart View Modes**: Toggle between **Text**, **Char**, **Hex**, **Bin**, **Dec**, and **Oct** views on the fly.
 - 📋 **Line Selection & Copy**: Click the timestamp gutter to select lines (Shift/Ctrl+click for range/multi-select) and copy with `Ctrl+C` or a floating "Copy Selected" button — works even for lines scrolled off-screen in the virtualized view.
 - 🔥 **Advanced Macro System**: Save, categorize, and execute commands from a resizable, color-filtered sidebar. Drag to reorder macros, with per-macro line endings.
 - 🕒 **Command History**: Persistent, deduplicated history buffer with dropdown access and arrow-key navigation.
 - 💾 **Portability**: Seamlessly Import/Export macro sets via JSON for easy configuration sharing.
 - 🎯 **Direct Saving**: One-click "Save to Macro" functionality directly from your command history.
-- 📋 **Flexible Line Breaking**: Break lines based on **Timeout**, **Byte Count**, **Chunks**, or specific **Sequences**.
+- 📋 **Flexible Line Breaking**: Break lines based on **Timeout**, **Byte Count**, **Chunks**, or specific **Sequences** — "before" and "after" sequence triggers are independent and combinable, each with its own enable/disable toggle.
 - 📂 **Session Logging**: Robust logging system with automated directory management — a fresh timestamped file is created each time logging starts.
 - ⚡ **ESC Sequences**: Full support for escaped characters and C-style strings in TX data (`\h(4F)`, `0x4F`, `\r`, `\n` and more), including a custom line-ending option in the sender.
 - 📏 **Configurable Display Limit**: Set the terminal's rolling line buffer from 1,000 to 100,000 lines; auto-scroll keeps following once the cap is reached.

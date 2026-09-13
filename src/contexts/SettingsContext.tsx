@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
 export type ViewMode = 'text' | 'hex' | 'bin' | 'dec' | 'oct' | 'char';
-export type BreakMode = 'none' | 'chunk' | 'bytes' | 'beforeSequence' | 'afterSequence' | 'timeout';
+export type BreakMode = 'none' | 'chunk' | 'bytes' | 'timeout';
 
 const getSaved = <T,>(key: string, fallback: T): T => {
     const saved = localStorage.getItem(key);
@@ -24,13 +24,22 @@ interface SettingsContextType {
     breakMode: BreakMode; setBreakMode: (v: BreakMode) => void;
     breakAfterBytesCount: number; setBreakAfterBytesCount: (v: number) => void;
     breakBeforeSequenceValue: string; setBreakBeforeSequenceValue: (v: string) => void;
+    breakBeforeSequenceEnabled: boolean; setBreakBeforeSequenceEnabled: (v: boolean) => void;
     breakAfterSequenceValue: string; setBreakAfterSequenceValue: (v: string) => void;
+    breakAfterSequenceEnabled: boolean; setBreakAfterSequenceEnabled: (v: boolean) => void;
     breakAfterTimeoutMs: number; setBreakAfterTimeoutMs: (v: number) => void;
     // Serial config
     dataBits: number; setDataBits: (v: number) => void;
     stopBits: number; setStopBits: (v: number) => void;
     parity: string; setParity: (v: string) => void;
     flowControl: string; setFlowControl: (v: string) => void;
+    invertRts: boolean; setInvertRts: (v: boolean) => void;
+    invertDtr: boolean; setInvertDtr: (v: boolean) => void;
+    invertCts: boolean; setInvertCts: (v: boolean) => void;
+    invertDsr: boolean; setInvertDsr: (v: boolean) => void;
+    invertCd: boolean; setInvertCd: (v: boolean) => void;
+    invertRi: boolean; setInvertRi: (v: boolean) => void;
+    rs485PreDelayMs: number; setRs485PreDelayMs: (v: number) => void;
     selectedPort: string; setSelectedPort: (v: string) => void;
     // Logging
     logPath: string; setLogPath: (v: string) => void;
@@ -59,16 +68,29 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [maxLines, setMaxLines] = useState(getSaved('oryx_maxLines', 10_000));
 
     const [eolSequence, setEolSequence] = useState(getSaved('oryx_eolSequence', '\\r\\n'));
-    const [breakMode, setBreakMode] = useState<BreakMode>(getSaved('oryx_breakMode', 'beforeSequence'));
+    const [breakMode, setBreakMode] = useState<BreakMode>(getSaved('oryx_breakMode', 'none'));
     const [breakAfterBytesCount, setBreakAfterBytesCount] = useState(getSaved('oryx_breakAfterBytesCount', 16));
     const [breakBeforeSequenceValue, setBreakBeforeSequenceValue] = useState(getSaved('oryx_breakBeforeSequenceValue', ''));
+    const [breakBeforeSequenceEnabled, setBreakBeforeSequenceEnabled] = useState(getSaved('oryx_breakBeforeSequenceEnabled', true));
     const [breakAfterSequenceValue, setBreakAfterSequenceValue] = useState(getSaved('oryx_breakAfterSequenceValue', ''));
+    const [breakAfterSequenceEnabled, setBreakAfterSequenceEnabled] = useState(getSaved('oryx_breakAfterSequenceEnabled', true));
     const [breakAfterTimeoutMs, setBreakAfterTimeoutMs] = useState(getSaved('oryx_breakAfterTimeoutMs', 50));
 
     const [dataBits, setDataBits] = useState(getSaved('oryx_dataBits', 8));
     const [stopBits, setStopBits] = useState(getSaved('oryx_stopBits', 1));
     const [parity, setParity] = useState(getSaved('oryx_parity', 'None'));
     const [flowControl, setFlowControl] = useState(getSaved('oryx_flowControl', 'None'));
+    // Default true: FTDI, Silicon Labs, and Prolific chips all drive RTS#/DTR#
+    // active-low in hardware (the standard RS-232 handshake convention), so
+    // the corrected polarity is what nearly everyone needs out of the box.
+    // Uncheck only for the rare chip that's genuinely active-high.
+    const [invertRts, setInvertRts] = useState(getSaved('oryx_invertRts', true));
+    const [invertDtr, setInvertDtr] = useState(getSaved('oryx_invertDtr', true));
+    const [invertCts, setInvertCts] = useState(getSaved('oryx_invertCts', true));
+    const [invertDsr, setInvertDsr] = useState(getSaved('oryx_invertDsr', true));
+    const [invertCd, setInvertCd] = useState(getSaved('oryx_invertCd', true));
+    const [invertRi, setInvertRi] = useState(getSaved('oryx_invertRi', true));
+    const [rs485PreDelayMs, setRs485PreDelayMs] = useState(getSaved('oryx_rs485PreDelayMs', 0));
     const [selectedPort, setSelectedPort] = useState<string>(getSaved('oryx_selectedPort', ''));
 
     const [logPath, setLogPath] = useState(''); // Do not persist log path to generate a new one each session
@@ -97,12 +119,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             oryx_breakMode: breakMode,
             oryx_breakAfterBytesCount: breakAfterBytesCount,
             oryx_breakBeforeSequenceValue: breakBeforeSequenceValue,
+            oryx_breakBeforeSequenceEnabled: breakBeforeSequenceEnabled,
             oryx_breakAfterSequenceValue: breakAfterSequenceValue,
+            oryx_breakAfterSequenceEnabled: breakAfterSequenceEnabled,
             oryx_breakAfterTimeoutMs: breakAfterTimeoutMs,
             oryx_dataBits: dataBits,
             oryx_stopBits: stopBits,
             oryx_parity: parity,
             oryx_flowControl: flowControl,
+            oryx_invertRts: invertRts,
+            oryx_invertDtr: invertDtr,
+            oryx_invertCts: invertCts,
+            oryx_invertDsr: invertDsr,
+            oryx_invertCd: invertCd,
+            oryx_invertRi: invertRi,
+            oryx_rs485PreDelayMs: rs485PreDelayMs,
             oryx_selectedPort: selectedPort,
             oryx_autoReconnect: autoReconnect,
             oryx_reconnectTimeoutSec: reconnectTimeoutSec,
@@ -110,7 +141,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         for (const [key, value] of Object.entries(settings)) {
             localStorage.setItem(key, JSON.stringify(value));
         }
-    }, [autoScroll, viewMode, showMacros, macroWidth, showTimestamp, showEol, maxLines, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakAfterSequenceValue, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, selectedPort, autoReconnect, reconnectTimeoutSec]);
+    }, [autoScroll, viewMode, showMacros, macroWidth, showTimestamp, showEol, maxLines, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakBeforeSequenceEnabled, breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs, selectedPort, autoReconnect, reconnectTimeoutSec]);
 
     const value: SettingsContextType = {
         viewMode, setViewMode, theme, setTheme,
@@ -120,10 +151,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         eolSequence, setEolSequence, breakMode, setBreakMode,
         breakAfterBytesCount, setBreakAfterBytesCount,
         breakBeforeSequenceValue, setBreakBeforeSequenceValue,
+        breakBeforeSequenceEnabled, setBreakBeforeSequenceEnabled,
         breakAfterSequenceValue, setBreakAfterSequenceValue,
+        breakAfterSequenceEnabled, setBreakAfterSequenceEnabled,
         breakAfterTimeoutMs, setBreakAfterTimeoutMs,
         dataBits, setDataBits, stopBits, setStopBits,
         parity, setParity, flowControl, setFlowControl,
+        invertRts, setInvertRts, invertDtr, setInvertDtr,
+        invertCts, setInvertCts, invertDsr, setInvertDsr, invertCd, setInvertCd, invertRi, setInvertRi,
+        rs485PreDelayMs, setRs485PreDelayMs,
         selectedPort, setSelectedPort,
         logPath, setLogPath, isLogging, setIsLogging,
         autoReconnect, setAutoReconnect, reconnectTimeoutSec, setReconnectTimeoutSec,

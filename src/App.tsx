@@ -86,8 +86,10 @@ function App() {
     viewMode, autoScroll, setAutoScroll, showMacros, setShowMacros,
     macroWidth, setMacroWidth, showTimestamp, setShowTimestamp,
     showEol, eolSequence, breakMode, breakAfterBytesCount,
-    breakBeforeSequenceValue, breakAfterSequenceValue, breakAfterTimeoutMs,
-    dataBits, stopBits, parity, flowControl,
+    breakBeforeSequenceValue, breakBeforeSequenceEnabled,
+    breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs,
+    dataBits, stopBits, parity, flowControl, invertRts, invertDtr,
+    invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs,
     setSelectedPort, logPath, setLogPath,
     isLogging, setIsLogging, autoReconnect, reconnectTimeoutSec,
     maxLines,
@@ -131,7 +133,9 @@ function App() {
   const breakModeRef = useRef(breakMode);
   const breakAfterBytesCountRef = useRef(breakAfterBytesCount);
   const breakBeforeSequenceValueRef = useRef(breakBeforeSequenceValue);
+  const breakBeforeSequenceEnabledRef = useRef(breakBeforeSequenceEnabled);
   const breakAfterSequenceValueRef = useRef(breakAfterSequenceValue);
+  const breakAfterSequenceEnabledRef = useRef(breakAfterSequenceEnabled);
   const breakAfterTimeoutMsRef = useRef(breakAfterTimeoutMs);
   const eolSequenceRef = useRef(eolSequence);
   const showEolRef = useRef(showEol);
@@ -195,13 +199,15 @@ function App() {
     breakModeRef.current = breakMode;
     breakAfterBytesCountRef.current = breakAfterBytesCount;
     breakBeforeSequenceValueRef.current = breakBeforeSequenceValue;
+    breakBeforeSequenceEnabledRef.current = breakBeforeSequenceEnabled;
     breakAfterSequenceValueRef.current = breakAfterSequenceValue;
+    breakAfterSequenceEnabledRef.current = breakAfterSequenceEnabled;
     breakAfterTimeoutMsRef.current = breakAfterTimeoutMs;
     eolSequenceRef.current = eolSequence;
     showEolRef.current = showEol;
     autoReconnectRef.current = autoReconnect;
     reconnectTimeoutSecRef.current = reconnectTimeoutSec;
-  }, [isLogging, logPath, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakAfterSequenceValue, breakAfterTimeoutMs, eolSequence, showEol, autoReconnect, reconnectTimeoutSec]);
+  }, [isLogging, logPath, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakBeforeSequenceEnabled, breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs, eolSequence, showEol, autoReconnect, reconnectTimeoutSec]);
 
   // ─── Macro panel resize drag ───────────────────────────────────────────────
   useEffect(() => {
@@ -280,7 +286,7 @@ function App() {
           }
         }
 
-        if (breakModeRef.current === 'beforeSequence' && breakBeforeSequenceValueRef.current) {
+        if (breakBeforeSequenceEnabledRef.current && breakBeforeSequenceValueRef.current) {
           try {
             const sequenceBytes = parseInput(breakBeforeSequenceValueRef.current);
             if (sequenceBytes.length > 0) {
@@ -295,7 +301,7 @@ function App() {
           } catch (e) { console.error('Failed to parse break-before sequence:', e); }
         }
 
-        if (breakModeRef.current === 'afterSequence' && breakAfterSequenceValueRef.current) {
+        if (breakAfterSequenceEnabledRef.current && breakAfterSequenceValueRef.current) {
           try {
             const sequenceBytes = parseInput(breakAfterSequenceValueRef.current);
             if (sequenceBytes.length > 0) {
@@ -488,7 +494,11 @@ function App() {
       }
 
       if (bufferRef.current.length > 0) {
-        const forceFlushTimeout = viewModeRef.current === 'text' ? 1000 : 50;
+        // An incomplete line (no matching EOL yet) is force-flushed once RX
+        // has been idle this long — was 1000ms for text mode specifically,
+        // which made any data not ending in the configured EOL sequence sit
+        // for a full second before appearing at all.
+        const forceFlushTimeout = 50;
         const isStale = now - lastReceiveTime.current > forceFlushTimeout;
         // Cap: force-flush if buffer exceeds 64 KB regardless of idle time.
         // Prevents unbounded growth when data streams continuously without
@@ -526,7 +536,7 @@ function App() {
 
   const handleConnect = async (port: string, baud: number) => {
     try {
-      await invoke('open_port', { portName: port, baudRate: baud, dataBits, stopBits, parity, flowControl });
+      await invoke('open_port', { portName: port, baudRate: baud, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs });
       setIsConnected(true);
       setHasSeenAnsi(false);
       addLog(`Connected to ${port} at ${baud} baud (${dataBits}${parity.charAt(0).toUpperCase()}${stopBits}).`, 'system');
@@ -677,6 +687,7 @@ function App() {
       <SettingsPanel
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        isConnected={isConnected}
       />
 
       <HelpOverlay

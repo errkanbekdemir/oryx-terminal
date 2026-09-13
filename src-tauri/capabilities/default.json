@@ -9,6 +9,7 @@
     "core:default",
     "opener:default",
     "dialog:default",
-    "core:path:default"
+    "core:path:default",
+    "core:app:default"
   ]
 }

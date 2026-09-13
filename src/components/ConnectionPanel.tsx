@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { RefreshCw, Play, Square, Settings as SettingsIcon, ChevronDown } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 
@@ -28,6 +29,10 @@ export function ConnectionPanel({
     }, [selectedPort]);
 
     const [ports, setPorts] = useState<SerialPortInfo[]>([]);
+    const [appVersion, setAppVersion] = useState('');
+    useEffect(() => {
+        getVersion().then(setAppVersion).catch(e => console.error('Failed to get app version:', e));
+    }, []);
     const [baudRate, setBaudRate] = useState<number>(() => {
         const saved = localStorage.getItem('oryx_baudRate');
         return saved ? Number(JSON.parse(saved)) : 115200;
@@ -47,14 +52,13 @@ export function ConnectionPanel({
         try {
             const availablePorts = await invoke<SerialPortInfo[]>('list_ports');
             setPorts(availablePorts);
-            const portNames = availablePorts.map(p => p.port_name);
             if (!selectedPort && availablePorts.length > 0) {
                 // No selection yet — auto-select first available
                 setSelectedPort(availablePorts[0].port_name);
-            } else if (selectedPort && !portNames.includes(selectedPort)) {
-                // Persisted port is no longer available — clear selection
-                setSelectedPort('');
             }
+            // A selection not present in the discovered list is left alone —
+            // it may be a manually-typed path (e.g. a virtual/loopback port)
+            // that the OS doesn't enumerate as a registered serial device.
         } catch (error) {
             console.error('Failed to list ports:', error);
         } finally {
@@ -80,12 +84,12 @@ export function ConnectionPanel({
                     const newNames = portNames.slice().sort().join(',');
                     // Only update if port list has changed
                     if (prevNames !== newNames) {
-                        // Auto-selection logic
+                        // Auto-select only when nothing is selected yet — a
+                        // selection missing from the list may be a manually
+                        // typed path (e.g. a loopback port) and is left alone.
                         const currentSelection = selectedPortRef.current;
                         if (!currentSelection && availablePorts.length > 0) {
                             setSelectedPort(availablePorts[0].port_name);
-                        } else if (currentSelection && !portNames.includes(currentSelection)) {
-                            setSelectedPort('');
                         }
                         return availablePorts;
                     }
@@ -101,6 +105,11 @@ export function ConnectionPanel({
 
     return (
         <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-6 px-6 py-4 bg-white/70 dark:bg-[#2b2d31]/70 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/5 shadow-[0_4px_20px_-5px_rgba(0,0,0,0.1)] animate-toolbar transition-all duration-300 select-none">
+            {appVersion && (
+                <span className="absolute top-1.5 right-2 text-[9px] text-gray-400/70 dark:text-gray-500/60 font-medium tracking-wide select-text" title="ORYX version">
+                    v{appVersion}
+                </span>
+            )}
 
             {/* SETTINGS GROUP (LEFT) */}
             <div className="flex items-center gap-6">
@@ -108,22 +117,26 @@ export function ConnectionPanel({
                 <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide ml-1">Serial Port</label>
                     <div className="relative">
-                        {/* Trigger Box */}
-                        <div
+                        {/* Editable so a device the OS doesn't enumerate as a
+                            registered serial port (e.g. a socat/virtual pty
+                            pair) can still be typed in directly. */}
+                        <input
+                            type="text"
+                            value={selectedPort}
+                            onChange={(e) => setSelectedPort(e.target.value)}
+                            onFocus={() => !(isConnected || isReconnecting) && setIsPortOpen(true)}
+                            disabled={isConnected || isReconnecting}
+                            placeholder="Select or type a port..."
+                            className={`w-full bg-white dark:bg-[#1a1c20] border border-gray-300 dark:border-gray-700 rounded-lg pl-4 pr-20 py-2.5 text-sm font-bold text-gray-900 dark:text-white min-w-[280px] shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all h-[42px] focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-60 disabled:cursor-not-allowed`}
+                        />
+                        {/* Dropdown Toggle */}
+                        <button
                             onClick={() => !(isConnected || isReconnecting) && setIsPortOpen(!isPortOpen)}
-                            className={`w-full bg-white dark:bg-[#1a1c20] border border-gray-300 dark:border-gray-700 rounded-lg pl-4 pr-12 py-2.5 text-sm font-bold text-gray-900 dark:text-white cursor-pointer min-w-[280px] shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all ${(isConnected || isReconnecting) ? 'opacity-60 cursor-not-allowed' : ''} flex items-center h-[42px]`}
+                            disabled={isConnected || isReconnecting}
+                            className="absolute right-9 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-white/10 rounded-md transition-all cursor-pointer disabled:opacity-30"
                         >
-                            {selectedPort ? (
-                                <div className="flex flex-col">
-                                    <span className="leading-none">{selectedPort}</span>
-                                    <span className="text-xs font-normal text-gray-500 dark:text-gray-400 mt-0.5">
-                                        {ports.find(p => p.port_name === selectedPort)?.description || 'Unknown Device'}
-                                    </span>
-                                </div>
-                            ) : (
-                                <span className="text-gray-400 font-normal">Select Port...</span>
-                            )}
-                        </div>
+                            <ChevronDown size={14} />
+                        </button>
 
                         {/* Refresh Button */}
                         <button
@@ -147,7 +160,7 @@ export function ConnectionPanel({
                                 />
                                 <ul className="absolute top-full left-0 mt-1 w-full bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl max-h-[240px] overflow-y-auto z-50 py-1">
                                     {ports.length === 0 ? (
-                                        <li className="px-4 py-2 text-sm text-gray-400 italic">No ports found</li>
+                                        <li className="px-4 py-2 text-sm text-gray-400 italic">No ports found — type a path above</li>
                                     ) : (
                                         ports.map((port) => (
                                             <li
@@ -169,6 +182,11 @@ export function ConnectionPanel({
                             </>
                         )}
                     </div>
+                    {selectedPort && ports.find(p => p.port_name === selectedPort) && (
+                        <span className="text-[10px] text-gray-500 dark:text-gray-400 ml-1 truncate max-w-[280px]">
+                            {ports.find(p => p.port_name === selectedPort)?.description}
+                        </span>
+                    )}
                 </div>
 
                 {/* Baud Rate Selection - Editable Combobox */}

@@ -25,12 +25,20 @@ export function useModemLines(active: boolean) {
             return;
         }
         let cancelled = false;
+        let inFlight = false;
         const poll = async () => {
+            // Skip firing a new poll on top of one that hasn't returned yet —
+            // if a read hangs at the OS/driver level, letting the interval
+            // keep piling up invokes on top of it leaks blocked threads.
+            if (inFlight) return;
+            inFlight = true;
             try {
                 const lines = await invoke<ModemLines>('read_modem_lines');
                 if (!cancelled) setModemLines(lines);
             } catch {
                 if (!cancelled) setModemLines(null); // disconnected / reconnect gap
+            } finally {
+                inFlight = false;
             }
         };
         poll();

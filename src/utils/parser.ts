@@ -98,9 +98,16 @@ export const parseInput = (input: string): number[] => {
             }
         }
 
-        // Plain character
-        bytes.push(char.charCodeAt(0));
-        i++;
+        // Plain character — encode as actual UTF-8 bytes, not the raw UTF-16
+        // code unit (which is only correct for ASCII and mangles anything
+        // else, e.g. ₺, é, ş). Merge surrogate pairs into one codepoint first
+        // so characters outside the BMP encode correctly too.
+        const codePoint = input.codePointAt(i) ?? char.charCodeAt(0);
+        const fullChar = String.fromCodePoint(codePoint);
+        for (const b of new TextEncoder().encode(fullChar)) {
+            bytes.push(b);
+        }
+        i += fullChar.length;
     }
 
     return bytes;

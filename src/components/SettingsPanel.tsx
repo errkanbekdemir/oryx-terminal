@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { X, Settings as SettingsIcon } from 'lucide-react';
 import clsx from 'clsx';
@@ -8,15 +9,20 @@ import { useSettings } from '../contexts/SettingsContext';
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
+    isConnected: boolean;
 }
 
-export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, isConnected }: SettingsPanelProps) {
     const {
         dataBits, setDataBits, stopBits, setStopBits, parity, setParity,
-        flowControl, setFlowControl, viewMode, setViewMode,
+        flowControl, setFlowControl, invertRts, setInvertRts, invertDtr, setInvertDtr,
+        invertCts, setInvertCts, invertDsr, setInvertDsr, invertCd, setInvertCd, invertRi, setInvertRi,
+        rs485PreDelayMs, setRs485PreDelayMs, viewMode, setViewMode,
         breakMode, setBreakMode, breakAfterBytesCount, setBreakAfterBytesCount,
         breakBeforeSequenceValue, setBreakBeforeSequenceValue,
+        breakBeforeSequenceEnabled, setBreakBeforeSequenceEnabled,
         breakAfterSequenceValue, setBreakAfterSequenceValue,
+        breakAfterSequenceEnabled, setBreakAfterSequenceEnabled,
         breakAfterTimeoutMs, setBreakAfterTimeoutMs,
         eolSequence, setEolSequence, showEol, setShowEol,
         maxLines, setMaxLines,
@@ -35,6 +41,66 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             setShowCustomInput(!['\\n', '\\r\\n', '\\r'].includes(eolSequence));
         }
     }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Flow control can be reconfigured on an already-open port — push it to
+    // the backend immediately instead of waiting for the next connect.
+    const handleFlowControlChange = (v: string) => {
+        setFlowControl(v);
+        if (isConnected) {
+            invoke('set_flow_control', { flowControl: v }).catch(e => console.error('Failed to apply flow control:', e));
+        }
+    };
+
+    // Many USB-UART chips (FTDI's RTS#/DTR# included) drive these pins
+    // active-low in hardware, so "asserted" in software comes out low on the
+    // wire. These invert the level written to the physical pin.
+    const handleInvertRtsChange = (v: boolean) => {
+        setInvertRts(v);
+        if (isConnected) {
+            invoke('set_invert_rts', { invert: v }).catch(e => console.error('Failed to invert RTS:', e));
+        }
+    };
+    const handleInvertDtrChange = (v: boolean) => {
+        setInvertDtr(v);
+        if (isConnected) {
+            invoke('set_invert_dtr', { invert: v }).catch(e => console.error('Failed to invert DTR:', e));
+        }
+    };
+    // Same active-low convention applies to the input status lines.
+    const handleInvertCtsChange = (v: boolean) => {
+        setInvertCts(v);
+        if (isConnected) {
+            invoke('set_invert_cts', { invert: v }).catch(e => console.error('Failed to invert CTS:', e));
+        }
+    };
+    const handleInvertDsrChange = (v: boolean) => {
+        setInvertDsr(v);
+        if (isConnected) {
+            invoke('set_invert_dsr', { invert: v }).catch(e => console.error('Failed to invert DSR:', e));
+        }
+    };
+    const handleInvertCdChange = (v: boolean) => {
+        setInvertCd(v);
+        if (isConnected) {
+            invoke('set_invert_cd', { invert: v }).catch(e => console.error('Failed to invert DCD:', e));
+        }
+    };
+    const handleInvertRiChange = (v: boolean) => {
+        setInvertRi(v);
+        if (isConnected) {
+            invoke('set_invert_ri', { invert: v }).catch(e => console.error('Failed to invert RI:', e));
+        }
+    };
+
+    // RS-485 only: how long to wait after driving RTS/DE high before the
+    // actual data write, giving the transceiver time to switch to transmit.
+    const handleRs485PreDelayChange = (v: number) => {
+        const ms = Math.max(0, v);
+        setRs485PreDelayMs(ms);
+        if (isConnected) {
+            invoke('set_rs485_pre_delay', { delayMs: ms }).catch(e => console.error('Failed to set RS-485 pre-delay:', e));
+        }
+    };
 
     if (!isOpen) return null;
 
@@ -127,12 +193,92 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                     { label: 'Half-Duplex Modem (DCD/RTS/CTS)', value: 'half_duplex' },
                                     { label: 'RS-485 Transceiver Control (RTS)', value: 'rs485' },
                                 ]}
-                                onChange={setFlowControl}
+                                onChange={handleFlowControlChange}
                             />
                         </div>
                         <p className="mt-2 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
-                            Manual, half-duplex, and RS-485 modes gate TX in the app (CTS wait / XOFF pause / RTS keying). Applied on next connect.
+                            Manual, half-duplex, and RS-485 modes gate TX in the app (CTS wait / XOFF pause / RTS keying). Flow control applies immediately if connected; other port settings apply on next connect.
                         </p>
+
+                        <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertRts}
+                                    onChange={(e) => handleInvertRtsChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert RTS</span>
+                            </label>
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertDtr}
+                                    onChange={(e) => handleInvertDtrChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert DTR</span>
+                            </label>
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertCts}
+                                    onChange={(e) => handleInvertCtsChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert CTS</span>
+                            </label>
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertDsr}
+                                    onChange={(e) => handleInvertDsrChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert DSR</span>
+                            </label>
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertCd}
+                                    onChange={(e) => handleInvertCdChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert DCD</span>
+                            </label>
+                            <label className="flex items-center gap-3 group cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={invertRi}
+                                    onChange={(e) => handleInvertRiChange(e.target.checked)}
+                                    className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                />
+                                <span className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Invert RI</span>
+                            </label>
+                        </div>
+                        <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+In RS-232, logical HIGH is a negative voltage and LOW is positive. USB-TTL chips like FTDI/CH340 implement RTS#/DTR# active-low — the chip pulls the pin to GND (0V) when it receives an "asserted" command.
+                        </p>
+
+                        {flowControl === 'rs485' && (
+                            <div className="mt-3">
+                                <label className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-600 dark:text-gray-400 font-bold tracking-tight whitespace-nowrap">RS-485 Pre-TX Delay</span>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        value={rs485PreDelayMs}
+                                        onChange={(e) => handleRs485PreDelayChange(Number(e.target.value))}
+                                        className="w-20 bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm font-mono"
+                                    />
+                                    <span className="text-[10px] text-gray-400">ms</span>
+                                </label>
+                                <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+                                    Wait this long after driving RTS/DE high before writing data — gives the transceiver time to switch into transmit mode. 0 disables the delay.
+                                </p>
+                            </div>
+                        )}
                     </section>
 
                     {/* Display Settings Section */}
@@ -360,54 +506,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                             <input
                                                 type="radio"
                                                 name="breakMode"
-                                                checked={breakMode === 'beforeSequence'}
-                                                onChange={() => setBreakMode('beforeSequence')}
-                                                className="w-4 h-4 border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b]"
-                                            />
-                                            <span className="text-xs text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Break before sequence</span>
-                                        </label>
-                                        {breakMode === 'beforeSequence' && (
-                                            <div className="ml-7 animate-in fade-in duration-150">
-                                                <input
-                                                    type="text"
-                                                    value={breakBeforeSequenceValue}
-                                                    onChange={(e) => setBreakBeforeSequenceValue(e.target.value)}
-                                                    placeholder="e.g. \r\n, $A"
-                                                    className="w-full bg-gray-50 dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-3 py-1.5 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-inner font-mono transition-all"
-                                                />
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="space-y-2">
-                                        <label className="flex items-center gap-3 group cursor-pointer transition-all">
-                                            <input
-                                                type="radio"
-                                                name="breakMode"
-                                                checked={breakMode === 'afterSequence'}
-                                                onChange={() => setBreakMode('afterSequence')}
-                                                className="w-4 h-4 border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b]"
-                                            />
-                                            <span className="text-xs text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Break after sequence</span>
-                                        </label>
-                                        {breakMode === 'afterSequence' && (
-                                            <div className="ml-7 animate-in fade-in duration-150">
-                                                <input
-                                                    type="text"
-                                                    value={breakAfterSequenceValue}
-                                                    onChange={(e) => setBreakAfterSequenceValue(e.target.value)}
-                                                    placeholder="e.g. [END]"
-                                                    className="w-full bg-gray-50 dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-3 py-1.5 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-inner font-mono transition-all"
-                                                />
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="space-y-2">
-                                        <label className="flex items-center gap-3 group cursor-pointer transition-all">
-                                            <input
-                                                type="radio"
-                                                name="breakMode"
                                                 checked={breakMode === 'timeout'}
                                                 onChange={() => setBreakMode('timeout')}
                                                 className="w-4 h-4 border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b]"
@@ -425,6 +523,50 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                                 <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">ms</span>
                                             </div>
                                         )}
+                                    </div>
+                                </div>
+
+                                {/* Sequence triggers: independent of the mode above, both can be
+                                    active at once (or together with chunk/bytes/timeout) — one marks
+                                    where a message starts, the other where it ends. */}
+                                <div className="mt-4 pt-3 border-t border-gray-100 dark:border-[#2a2d33] space-y-3 pl-0.5">
+                                    <div className="space-y-1">
+                                        <label className="flex items-center gap-3 group cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={breakBeforeSequenceEnabled}
+                                                onChange={(e) => setBreakBeforeSequenceEnabled(e.target.checked)}
+                                                className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                            />
+                                            <span className="text-xs text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Break before sequence</span>
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={breakBeforeSequenceValue}
+                                            onChange={(e) => setBreakBeforeSequenceValue(e.target.value)}
+                                            disabled={!breakBeforeSequenceEnabled}
+                                            placeholder="e.g. \r\n, $A"
+                                            className="ml-7 w-[calc(100%-1.75rem)] bg-gray-50 dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-3 py-1.5 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-inner font-mono transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="flex items-center gap-3 group cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={breakAfterSequenceEnabled}
+                                                onChange={(e) => setBreakAfterSequenceEnabled(e.target.checked)}
+                                                className="w-4 h-4 rounded-md border-gray-300 text-blue-500 focus:ring-blue-500 dark:bg-[#1a1c20] dark:border-[#40444b] transition-all"
+                                            />
+                                            <span className="text-xs text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors font-bold tracking-tight">Break after sequence</span>
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={breakAfterSequenceValue}
+                                            onChange={(e) => setBreakAfterSequenceValue(e.target.value)}
+                                            disabled={!breakAfterSequenceEnabled}
+                                            placeholder="e.g. [END]"
+                                            className="ml-7 w-[calc(100%-1.75rem)] bg-gray-50 dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-3 py-1.5 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-inner font-mono transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                        />
                                     </div>
                                 </div>
                             </div>
