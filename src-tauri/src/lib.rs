@@ -37,6 +37,9 @@ pub fn run() {
             rs485_post_delay_ms: Arc::new(AtomicU64::new(0)),
             half_duplex_pre_delay_ms: Arc::new(AtomicU64::new(0)),
             half_duplex_post_delay_ms: Arc::new(AtomicU64::new(0)),
+            tx_key_lock: Arc::new(tokio::sync::Mutex::new(())),
+            tx_keyed: Arc::new(AtomicBool::new(false)),
+            tx_key_epoch: Arc::new(AtomicU64::new(0)),
         })
         .invoke_handler(tauri::generate_handler![
             serial_manager::list_ports,

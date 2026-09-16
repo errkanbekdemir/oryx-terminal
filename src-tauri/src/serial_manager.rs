@@ -54,6 +54,25 @@ pub struct SerialState {
     /// waits for the OS-reported TX queue to drain (see `drain_tx`) — covers
     /// latency the OS can't see. Most setups can leave this at 0.
     pub half_duplex_post_delay_ms: Arc<AtomicU64>,
+    /// Serializes the RTS-keyed critical section (RS-485/Half-Duplex only):
+    /// raise RTS (if not already held) → pre-delay → write → drain. Without
+    /// this, two `send_data` calls close together (rapid sends, a macro
+    /// firing while a manual send is in flight) could race — one dropping
+    /// RTS out from under the other's still-in-progress write, or both
+    /// raising/writing concurrently and interleaving bytes on the wire.
+    pub tx_key_lock: Arc<tokio::sync::Mutex<()>>,
+    /// True while RTS/DE is being held asserted across a possible burst of
+    /// back-to-back sends. A send that finds this already true skips
+    /// re-raising RTS and re-running the pre-delay — it just extends the
+    /// existing hold instead of dropping and re-keying between messages.
+    pub tx_keyed: Arc<AtomicBool>,
+    /// Bumped by every keyed send as it begins. After finishing its own
+    /// write/drain/post-delay, a send only drops RTS if this still matches
+    /// the value it recorded — i.e. nobody newer started while it was
+    /// finishing up. Otherwise it leaves RTS asserted for that newer send,
+    /// which will make the same check itself once it's done. This makes the
+    /// *last* send in a burst the one responsible for the final drop.
+    pub tx_key_epoch: Arc<AtomicU64>,
 }
 
 /// Desired RTS/DTR levels + XOFF gate, shared with the read/reconnect threads
@@ -478,6 +497,9 @@ pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
     *state.active_port.lock().map_err(|e| e.to_string())? = None;
     *state.port.lock().map_err(|e| e.to_string())? = None;
     state.tx_paused.store(false, Ordering::SeqCst);
+    // Don't leave a stale "keyed" hold across a disconnect — the next
+    // connection's first send must raise RTS and run its pre-delay again.
+    state.tx_keyed.store(false, Ordering::SeqCst);
 
     Ok(())
 }
@@ -535,6 +557,41 @@ async fn drain_tx(port: &mut dyn SerialPort) {
     }
 }
 
+/// Release RTS/DE after an optional grace delay, but only if nobody newer
+/// has started a keyed send since `my_epoch` was recorded (see
+/// `SerialState::tx_key_epoch`). Spawned as a detached task so `send_data`
+/// can return to the caller as soon as its own write is confirmed drained,
+/// instead of blocking every command for the full grace period — a rapid
+/// next send can then catch RTS still asserted (via `tx_keyed`) and extend
+/// the hold instead of racing a drop that belongs to a different message.
+fn schedule_rts_release(
+    port_arc: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
+    key_lock: Arc<tokio::sync::Mutex<()>>,
+    keyed: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
+    my_epoch: u64,
+    post_delay_ms: u64,
+    inv_rts: bool,
+) {
+    tokio::spawn(async move {
+        if post_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(post_delay_ms)).await;
+        }
+        let _guard = key_lock.lock().await;
+        if epoch.load(Ordering::SeqCst) != my_epoch {
+            // A newer send started while we were waiting — it (or whichever
+            // one finishes last) is responsible for the eventual release.
+            return;
+        }
+        if let Ok(mut port_guard) = port_arc.lock() {
+            if let Some(port) = port_guard.as_mut() {
+                let _ = port.write_request_to_send(false != inv_rts);
+            }
+        }
+        keyed.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Clone the live port handle and release `state.port` immediately. Clones
 /// share the same underlying OS device — settings and line state written to
 /// one are visible through the others — so every command does its actual
@@ -570,59 +627,77 @@ pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>) -> Result<(
 
     match mode {
         FlowMode::HalfDuplex => {
-            wait_until(|| !(port.read_carrier_detect().unwrap_or(false) != inv_cd), "carrier detected (DCD high)").await?;
-            port.write_request_to_send(true != inv_rts).map_err(|e| e.to_string())?;
-            let handshake = wait_until(|| port.read_clear_to_send().unwrap_or(false) != inv_cts, "CTS not asserted").await;
-            // and_then can't await, so branch instead — the handshake only
-            // confirms the peer granted the channel; a keyed-up radio may
-            // still need extra ramp-up/settle time on either side of it.
-            let result = match handshake {
-                Ok(_) => {
+            // Serialize the keyed critical section: without this, two sends
+            // close together (rapid Enter, a macro firing mid-send) could
+            // race on RTS or interleave writes on the wire.
+            let key_guard = state.tx_key_lock.lock().await;
+            let already_keyed = state.tx_keyed.load(Ordering::SeqCst);
+
+            // Already-keyed sends skip the DCD/CTS handshake and pre-delay
+            // entirely — they extend the existing hold instead of dropping
+            // and re-keying between back-to-back messages.
+            let handshake: Result<(), String> = if already_keyed {
+                Ok(())
+            } else {
+                wait_until(|| !(port.read_carrier_detect().unwrap_or(false) != inv_cd), "carrier detected (DCD high)").await?;
+                port.write_request_to_send(true != inv_rts).map_err(|e| e.to_string())?;
+                let cts = wait_until(|| port.read_clear_to_send().unwrap_or(false) != inv_cts, "CTS not asserted").await;
+                if cts.is_ok() {
+                    state.tx_keyed.store(true, Ordering::SeqCst);
                     let pre_delay = state.half_duplex_pre_delay_ms.load(Ordering::SeqCst);
                     if pre_delay > 0 {
                         tokio::time::sleep(Duration::from_millis(pre_delay)).await;
                     }
+                }
+                cts
+            };
+
+            let my_epoch = state.tx_key_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            let result = match handshake {
+                Ok(_) => {
                     let r = port.write_all(&data)
                         .and_then(|_| port.flush())
                         .map_err(|e| e.to_string());
                     if r.is_ok() {
                         drain_tx(&mut *port).await;
-                        // Optional extra margin on top of the real drain
-                        // wait above, for latency drain_tx can't see (e.g.
-                        // a USB-serial bridge's own onboard buffer).
-                        let post_delay = state.half_duplex_post_delay_ms.load(Ordering::SeqCst);
-                        if post_delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(post_delay)).await;
-                        }
                     }
                     r
                 }
                 Err(e) => Err(e),
             };
-            let _ = port.write_request_to_send(false != inv_rts);
+            drop(key_guard); // let a send arriving right now proceed immediately — RTS stays up for it
+
+            // Optional extra margin on top of drain_tx's real wait, for
+            // latency it can't see (e.g. a USB-serial bridge's own onboard
+            // buffer) — skipped on a failed write, so a failure doesn't
+            // needlessly hold the bus for the configured grace period.
+            let post_delay = if result.is_ok() { state.half_duplex_post_delay_ms.load(Ordering::SeqCst) } else { 0 };
+            schedule_rts_release(state.port.clone(), state.tx_key_lock.clone(), state.tx_keyed.clone(), state.tx_key_epoch.clone(), my_epoch, post_delay, inv_rts);
             result
         }
         FlowMode::Rs485 => {
-            port.write_request_to_send(true != inv_rts).map_err(|e| e.to_string())?;
-            let pre_delay = state.rs485_pre_delay_ms.load(Ordering::SeqCst);
-            if pre_delay > 0 {
-                tokio::time::sleep(Duration::from_millis(pre_delay)).await;
+            let key_guard = state.tx_key_lock.lock().await;
+            let already_keyed = state.tx_keyed.load(Ordering::SeqCst);
+            if !already_keyed {
+                port.write_request_to_send(true != inv_rts).map_err(|e| e.to_string())?;
+                state.tx_keyed.store(true, Ordering::SeqCst);
+                let pre_delay = state.rs485_pre_delay_ms.load(Ordering::SeqCst);
+                if pre_delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(pre_delay)).await;
+                }
             }
+
+            let my_epoch = state.tx_key_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             let result = port.write_all(&data)
                 .and_then(|_| port.flush()) // drain before releasing the bus
                 .map_err(|e| e.to_string());
             if result.is_ok() {
                 drain_tx(&mut *port).await;
-                // Optional extra margin on top of the real drain wait above,
-                // for latency drain_tx can't see (e.g. a USB-serial bridge's
-                // own onboard buffer clocking bytes out after the OS-level
-                // queue already reports empty).
-                let post_delay = state.rs485_post_delay_ms.load(Ordering::SeqCst);
-                if post_delay > 0 {
-                    tokio::time::sleep(Duration::from_millis(post_delay)).await;
-                }
             }
-            let _ = port.write_request_to_send(false != inv_rts);
+            drop(key_guard); // let a send arriving right now proceed immediately — RTS stays up for it
+
+            let post_delay = if result.is_ok() { state.rs485_post_delay_ms.load(Ordering::SeqCst) } else { 0 };
+            schedule_rts_release(state.port.clone(), state.tx_key_lock.clone(), state.tx_keyed.clone(), state.tx_key_epoch.clone(), my_epoch, post_delay, inv_rts);
             result
         }
         _ => port.write_all(&data).map_err(|e| e.to_string()),
