@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, ReactNode } from 'react';
-import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText } from 'lucide-react';
+import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText, Pin } from 'lucide-react';
 import { Dropdown } from './Dropdown';
 import { useSettings } from '../contexts/SettingsContext';
 import { useModemLines } from '../hooks/useModemLines';
@@ -113,7 +113,7 @@ export function StatusBar({
 }: StatusBarProps) {
     const {
         theme, setTheme, viewMode, setViewMode,
-        autoScroll, setAutoScroll, showMacros, setShowMacros,
+        autoScroll, setAutoScroll, alwaysOnTop, setAlwaysOnTop, showMacros, setShowMacros,
         selectedPort, dataBits, stopBits, parity, flowControl,
         reconnectTimeoutSec, isLogging, setIsLogging,
     } = useSettings();
@@ -293,6 +293,17 @@ export function StatusBar({
                 title="Clear Terminal (Ctrl+L)"
             >
                 <Trash2 size={14} />
+            </button>
+
+            <button
+                onClick={() => setAlwaysOnTop(!alwaysOnTop)}
+                className={`p-1.5 rounded-md transition-all active:scale-90 ${alwaysOnTop
+                    ? 'text-blue-600 dark:text-blue-400 bg-blue-500/10'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5 hover:text-blue-500 dark:hover:text-blue-400'
+                    }`}
+                title={alwaysOnTop ? 'Always on Top: On — click to disable' : 'Always on Top: Off — click to keep window pinned above others'}
+            >
+                <Pin size={14} className={`transition-transform duration-200 ${alwaysOnTop ? 'rotate-0' : '-rotate-45'}`} fill={alwaysOnTop ? 'currentColor' : 'none'} />
             </button>
 
             <button

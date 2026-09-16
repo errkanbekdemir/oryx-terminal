@@ -5,6 +5,23 @@ export interface AnsiSegment {
     underline?: boolean;
 }
 
+/** SGR state (color/weight/underline) in effect at a point in the stream.
+ *  Real terminals carry this across line breaks until an explicit reset —
+ *  a device that sets a color once and then prints several plain lines
+ *  expects all of them to stay that color, not just the first. */
+export interface AnsiState {
+    fg?: string;
+    bg?: string;
+    bold: boolean;
+    underline: boolean;
+}
+
+export const DEFAULT_ANSI_STATE: AnsiState = { fg: undefined, bg: undefined, bold: false, underline: false };
+
+export function isDefaultAnsiState(state: AnsiState): boolean {
+    return state.fg === undefined && state.bg === undefined && !state.bold && !state.underline;
+}
+
 const colorMap: Record<number, string> = {
     // Standard colors
     30: 'var(--ansi-black)',
@@ -48,15 +65,15 @@ const colorMap: Record<number, string> = {
 // Must reset lastIndex before each use because of the `g` flag.
 const ANSI_REGEX = /\x1b\[([\d;]*)m/g;
 
-export function parseAnsi(text: string): AnsiSegment[] {
+export function parseAnsi(text: string, initial: AnsiState = DEFAULT_ANSI_STATE): { segments: AnsiSegment[]; state: AnsiState } {
     const segments: AnsiSegment[] = [];
     ANSI_REGEX.lastIndex = 0;
 
     let lastIndex = 0;
-    let currentFg: string | undefined = undefined;
-    let currentBg: string | undefined = undefined;
-    let currentBold = false;
-    let currentUnderline = false;
+    let currentFg = initial.fg;
+    let currentBg = initial.bg;
+    let currentBold = initial.bold;
+    let currentUnderline = initial.underline;
 
     let match;
     while ((match = ANSI_REGEX.exec(text)) !== null) {
@@ -115,5 +132,5 @@ export function parseAnsi(text: string): AnsiSegment[] {
         });
     }
 
-    return segments;
+    return { segments, state: { fg: currentFg, bg: currentBg, bold: currentBold, underline: currentUnderline } };
 }

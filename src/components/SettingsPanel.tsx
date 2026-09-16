@@ -17,7 +17,9 @@ export function SettingsPanel({ isOpen, onClose, isConnected }: SettingsPanelPro
         dataBits, setDataBits, stopBits, setStopBits, parity, setParity,
         flowControl, setFlowControl, invertRts, setInvertRts, invertDtr, setInvertDtr,
         invertCts, setInvertCts, invertDsr, setInvertDsr, invertCd, setInvertCd, invertRi, setInvertRi,
-        rs485PreDelayMs, setRs485PreDelayMs, viewMode, setViewMode,
+        rs485PreDelayMs, setRs485PreDelayMs, rs485PostDelayMs, setRs485PostDelayMs,
+        halfDuplexPreDelayMs, setHalfDuplexPreDelayMs, halfDuplexPostDelayMs, setHalfDuplexPostDelayMs,
+        viewMode, setViewMode,
         breakMode, setBreakMode, breakAfterBytesCount, setBreakAfterBytesCount,
         breakBeforeSequenceValue, setBreakBeforeSequenceValue,
         breakBeforeSequenceEnabled, setBreakBeforeSequenceEnabled,
@@ -99,6 +101,40 @@ export function SettingsPanel({ isOpen, onClose, isConnected }: SettingsPanelPro
         setRs485PreDelayMs(ms);
         if (isConnected) {
             invoke('set_rs485_pre_delay', { delayMs: ms }).catch(e => console.error('Failed to set RS-485 pre-delay:', e));
+        }
+    };
+
+    // RS-485 only: optional extra hold on RTS/DE after the backend already
+    // waits for the OS-reported TX queue to drain — covers latency the OS
+    // can't see (e.g. a USB-serial bridge's own onboard buffer).
+    const handleRs485PostDelayChange = (v: number) => {
+        const ms = Math.max(0, v);
+        setRs485PostDelayMs(ms);
+        if (isConnected) {
+            invoke('set_rs485_post_delay', { delayMs: ms }).catch(e => console.error('Failed to set RS-485 post-delay:', e));
+        }
+    };
+
+    // Half-duplex only: extra settle time after the CTS handshake grants the
+    // channel but before the actual write — the handshake confirms the peer
+    // is ready, but some PTT/VOX-keyed radios still need physical ramp-up
+    // time beyond that.
+    const handleHalfDuplexPreDelayChange = (v: number) => {
+        const ms = Math.max(0, v);
+        setHalfDuplexPreDelayMs(ms);
+        if (isConnected) {
+            invoke('set_half_duplex_pre_delay', { delayMs: ms }).catch(e => console.error('Failed to set half-duplex pre-delay:', e));
+        }
+    };
+
+    // Half-duplex only: optional extra hold on RTS after the backend already
+    // waits for the OS-reported TX queue to drain — covers latency the OS
+    // can't see.
+    const handleHalfDuplexPostDelayChange = (v: number) => {
+        const ms = Math.max(0, v);
+        setHalfDuplexPostDelayMs(ms);
+        if (isConnected) {
+            invoke('set_half_duplex_post_delay', { delayMs: ms }).catch(e => console.error('Failed to set half-duplex post-delay:', e));
         }
     };
 
@@ -276,6 +312,56 @@ In RS-232, logical HIGH is a negative voltage and LOW is positive. USB-TTL chips
                                 </label>
                                 <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
                                     Wait this long after driving RTS/DE high before writing data — gives the transceiver time to switch into transmit mode. 0 disables the delay.
+                                </p>
+                                <label className="mt-2 flex items-center gap-3">
+                                    <span className="text-xs text-gray-600 dark:text-gray-400 font-bold tracking-tight whitespace-nowrap">RS-485 After-TX Delay</span>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        value={rs485PostDelayMs}
+                                        onChange={(e) => handleRs485PostDelayChange(Number(e.target.value))}
+                                        className="w-20 bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm font-mono"
+                                    />
+                                    <span className="text-[10px] text-gray-400">ms</span>
+                                </label>
+                                <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+                                    ORYX already waits for the OS to confirm the data has actually drained before releasing the bus. This is an optional extra hold on top of that, for latency the OS can't see (e.g. a USB-serial adapter's own buffer). Usually fine at 0 — raise it only if you still see corrupted tails.
+                                </p>
+                            </div>
+                        )}
+
+                        {flowControl === 'half_duplex' && (
+                            <div className="mt-3">
+                                <label className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-600 dark:text-gray-400 font-bold tracking-tight whitespace-nowrap">Half-Duplex Pre-TX Delay</span>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        value={halfDuplexPreDelayMs}
+                                        onChange={(e) => handleHalfDuplexPreDelayChange(Number(e.target.value))}
+                                        className="w-20 bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm font-mono"
+                                    />
+                                    <span className="text-[10px] text-gray-400">ms</span>
+                                </label>
+                                <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+                                    Extra wait after CTS grants the channel, before writing data — the handshake confirms the peer is ready, but a PTT/VOX-keyed radio may still need more ramp-up time. 0 disables the delay.
+                                </p>
+                                <label className="mt-2 flex items-center gap-3">
+                                    <span className="text-xs text-gray-600 dark:text-gray-400 font-bold tracking-tight whitespace-nowrap">Half-Duplex After-TX Delay</span>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        value={halfDuplexPostDelayMs}
+                                        onChange={(e) => handleHalfDuplexPostDelayChange(Number(e.target.value))}
+                                        className="w-20 bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-[#303339] rounded-lg px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm font-mono"
+                                    />
+                                    <span className="text-[10px] text-gray-400">ms</span>
+                                </label>
+                                <p className="mt-1 text-[9px] text-gray-400 dark:text-gray-500 italic pl-1">
+                                    ORYX already waits for the OS to confirm the data has actually drained before releasing RTS. This is an optional extra hold on top of that, for latency the OS can't see. Usually fine at 0 — raise it only if a keyed-up radio still clips the tail.
                                 </p>
                             </div>
                         )}

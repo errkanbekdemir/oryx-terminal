@@ -11,6 +11,7 @@ import { MacroPanel, Macro, MacroLineEnding } from './components/MacroPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { HelpOverlay } from './components/HelpOverlay';
 import { useSettings } from './contexts/SettingsContext';
+import { parseAnsi, AnsiState, DEFAULT_ANSI_STATE } from './utils/ansiParser';
 import './App.css';
 
 interface SerialPayload {
@@ -83,13 +84,14 @@ interface TerminalBuffer {
 
 function App() {
   const {
-    viewMode, autoScroll, setAutoScroll, showMacros, setShowMacros,
+    viewMode, autoScroll, setAutoScroll, alwaysOnTop, showMacros, setShowMacros,
     macroWidth, setMacroWidth, showTimestamp, setShowTimestamp,
     showEol, eolSequence, breakMode, breakAfterBytesCount,
     breakBeforeSequenceValue, breakBeforeSequenceEnabled,
     breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs,
     dataBits, stopBits, parity, flowControl, invertRts, invertDtr,
-    invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs,
+    invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs, rs485PostDelayMs,
+    halfDuplexPreDelayMs, halfDuplexPostDelayMs,
     setSelectedPort, logPath, setLogPath,
     isLogging, setIsLogging, autoReconnect, reconnectTimeoutSec,
     maxLines,
@@ -101,7 +103,6 @@ function App() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [reconnectElapsed, setReconnectElapsed] = useState(0);
   const [isResizing, setIsResizing] = useState(false);
-  const [hasSeenAnsi, setHasSeenAnsi] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
@@ -110,6 +111,10 @@ function App() {
   const lastFlushTime = useRef<number>(0);
   const flushInProgressRef = useRef(false);
   const viewModeRef = useRef(viewMode);
+  // SGR state (color/bold/underline) in effect at the end of the last line
+  // appended — carried into the next line so a color set once keeps applying
+  // to later plain lines instead of resetting every line boundary.
+  const ansiStateRef = useRef<AnsiState>(DEFAULT_ANSI_STATE);
 
   // Refs for logging and line breaking (hot-path access avoids stale closures)
   const isLoggingRef = useRef(false);
@@ -139,6 +144,13 @@ function App() {
   const breakAfterTimeoutMsRef = useRef(breakAfterTimeoutMs);
   const eolSequenceRef = useRef(eolSequence);
   const showEolRef = useRef(showEol);
+
+  // ─── Keep the OS window pinned above others in sync with the setting ──────
+  // Runs on mount too, so a persisted "on" from a previous session is
+  // re-applied — window state itself isn't persisted by the OS/Tauri.
+  useEffect(() => {
+    invoke('set_always_on_top', { on: alwaysOnTop }).catch(e => console.error('Failed to set always-on-top:', e));
+  }, [alwaysOnTop]);
 
   // ─── Initialize default log path when none is saved ───────────────────────
   useEffect(() => {
@@ -226,8 +238,9 @@ function App() {
   }, [isResizing, setMacroWidth]);
 
   const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]) => {
-    if (text.includes('\x1b')) setHasSeenAnsi(true);
-    const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData };
+    const ansiStart = ansiStateRef.current;
+    ansiStateRef.current = parseAnsi(text, ansiStart).state;
+    const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData, ansiStart };
     setTermBuf(prev => {
       const next = [...prev.lines, entry];
       const max = maxLinesRef.current;
@@ -420,7 +433,7 @@ function App() {
   useEffect(() => {
     const unlistenDisconnect = listen('serial-disconnected', () => {
       setIsConnected(false);
-      setHasSeenAnsi(false);
+      ansiStateRef.current = DEFAULT_ANSI_STATE;
       addLog('[DISCONNECTED] Port unexpectedly closed.', 'error');
 
       if (!autoReconnectRef.current) {
@@ -514,7 +527,7 @@ function App() {
   const handleClear = useCallback(() => {
     // Fold the cleared lines into `trimmed` so Virtuoso's firstItemIndex stays monotonic
     setTermBuf(prev => ({ lines: [], trimmed: prev.trimmed + prev.lines.length }));
-    setHasSeenAnsi(false);
+    ansiStateRef.current = DEFAULT_ANSI_STATE;
     addLog('Logs cleared.', 'system');
   }, [addLog]);
 
@@ -536,9 +549,9 @@ function App() {
 
   const handleConnect = async (port: string, baud: number) => {
     try {
-      await invoke('open_port', { portName: port, baudRate: baud, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs });
+      await invoke('open_port', { portName: port, baudRate: baud, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs, rs485PostDelayMs, halfDuplexPreDelayMs, halfDuplexPostDelayMs });
       setIsConnected(true);
-      setHasSeenAnsi(false);
+      ansiStateRef.current = DEFAULT_ANSI_STATE;
       addLog(`Connected to ${port} at ${baud} baud (${dataBits}${parity.charAt(0).toUpperCase()}${stopBits}).`, 'system');
     } catch (e) {
       console.error(e);
@@ -556,7 +569,7 @@ function App() {
     try {
       await invoke('close_port');
       setIsConnected(false);
-      setHasSeenAnsi(false);
+      ansiStateRef.current = DEFAULT_ANSI_STATE;
       addLog('Disconnected.', 'system');
     } catch (e) { console.error(e); }
   };
@@ -638,7 +651,6 @@ function App() {
               showEol={showEol}
               eolSequence={eolSequence}
               onClear={handleClear}
-              hasSeenAnsi={hasSeenAnsi}
               onSendCommand={handleMacroRun}
             />
           </ErrorBoundary>

@@ -3,7 +3,7 @@ import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import clsx from 'clsx';
 import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock } from 'lucide-react';
 import { parseInput } from '../utils/parser';
-import { parseAnsi } from '../utils/ansiParser';
+import { parseAnsi, AnsiState, DEFAULT_ANSI_STATE, isDefaultAnsiState } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
 
 export interface LogEntry {
@@ -12,6 +12,10 @@ export interface LogEntry {
     type: 'rx' | 'tx' | 'system' | 'error';
     text: string;
     originalData?: number[];
+    /** SGR state carried over from the previous line, so a color set once
+     *  and never reset keeps applying to later plain lines instead of
+     *  silently reverting to default. */
+    ansiStart?: AnsiState;
 }
 
 interface TerminalProps {
@@ -26,7 +30,6 @@ interface TerminalProps {
     showEol: boolean;
     eolSequence: string;
     onClear: () => void;
-    hasSeenAnsi: boolean;
     onSendCommand?: (command: string) => Promise<boolean>;
 }
 
@@ -226,7 +229,6 @@ interface TerminalRowProps {
     showTimestamp: boolean;
     showEol: boolean;
     eolBytes: number[];
-    hasSeenAnsi: boolean;
     inspectorEnabled: boolean;
     autoScroll: boolean;
     isSelected: boolean;
@@ -250,7 +252,6 @@ const TerminalRow = memo(function TerminalRow({
     showTimestamp,
     showEol,
     eolBytes,
-    hasSeenAnsi,
     inspectorEnabled,
     autoScroll,
     isSelected,
@@ -278,7 +279,17 @@ const TerminalRow = memo(function TerminalRow({
         content = formatData(line.originalData!, viewMode);
     }
 
-    const lineHasAnsi = /\x1b\[[\d;]*m/.test(line.text);
+    // line.text is always the UTF-8 decode of the raw bytes, even in
+    // Hex/Bin/Dec/Oct/Char view — so binary payloads can coincidentally
+    // decode into something matching an ANSI CSI sequence. ANSI is a
+    // text-view concept only; ignore it entirely outside Text view so
+    // arbitrary binary data can't flip the line's color.
+    const lineHasAnsi = !isNonTextMode && /\x1b\[[\d;]*m/.test(line.text);
+    const ansiStart = line.ansiStart ?? DEFAULT_ANSI_STATE;
+    // A line with no codes of its own still needs ANSI-aware rendering if an
+    // earlier line left a color/style active — otherwise it wrongly snaps
+    // back to the default look mid-stream even though nothing reset it.
+    const usesAnsiStyling = !isNonTextMode && (lineHasAnsi || !isDefaultAnsiState(ansiStart));
     const isRx = line.type === 'rx';
     const isTx = line.type === 'tx';
 
@@ -324,10 +335,10 @@ const TerminalRow = memo(function TerminalRow({
             onContextMenu={handleRowContextMenu}
             className={clsx("px-0 py-0.5 leading-tight break-all flex border-b border-gray-100 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 group", {
             // SIMPLE MODE (Green/Blue)
-            "text-green-600 dark:text-green-400": isRx && !hasSeenAnsi && !lineHasAnsi,
-            "text-blue-600 dark:text-blue-400": isTx && !hasSeenAnsi && !lineHasAnsi,
+            "text-green-600 dark:text-green-400": isRx && !usesAnsiStyling,
+            "text-blue-600 dark:text-blue-400": isTx && !usesAnsiStyling,
             // ANSI MODE (Neutral/Purple)
-            "text-purple-700 dark:text-purple-300": isTx && (hasSeenAnsi || lineHasAnsi),
+            "text-purple-700 dark:text-purple-300": isTx && usesAnsiStyling,
             // System/Error always distinct
             "text-gray-600 dark:text-gray-400": line.type === 'system',
             "text-red-600 dark:text-red-400": line.type === 'error',
@@ -383,8 +394,8 @@ const TerminalRow = memo(function TerminalRow({
                         content
                     )
                 ) : (
-                    content.includes('\x1b') ? (
-                        parseAnsi(content).map((segment, idx) => (
+                    usesAnsiStyling ? (
+                        parseAnsi(content, ansiStart).segments.map((segment, idx) => (
                             <span
                                 key={idx}
                                 style={segment.style}
@@ -472,7 +483,6 @@ export function Terminal({
     showEol,
     eolSequence,
     onClear,
-    hasSeenAnsi,
     onSendCommand,
 }: TerminalProps) {
     const virtuosoRef = useRef<VirtuosoHandle>(null);
@@ -674,7 +684,6 @@ export function Terminal({
                         showTimestamp={showTimestamp}
                         showEol={showEol}
                         eolBytes={eolBytes}
-                        hasSeenAnsi={hasSeenAnsi}
                         inspectorEnabled={inspectorEnabled}
                         autoScroll={autoScroll}
                         isSelected={selectedIds.has(line.id)}

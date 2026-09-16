@@ -4,7 +4,7 @@
 [![React](https://img.shields.io/badge/React-v19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Rust](https://img.shields.io/badge/Rust-v1.75+-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)]()
 
 **ORYX** is a premium, high-performance serial terminal designed for modern developers and engineers. Built with the speed of **Rust** and the flexibility of **React**, it offers a rock-solid cross-platform experience for all your serial communication needs.
 
@@ -21,7 +21,8 @@
 - 🔀 **9 Flow Control Modes**: None, Hardware, Software, Combined (RTS/CTS + XOn/XOff), Manual Hardware/Software/Combined, Half-Duplex Modem Handshake, and RS-485 Transceiver Control — all apply live, no reconnect needed when switching modes.
 - 🎛️ **Manual Modem Line Control**: Toggle RTS/DTR by hand and watch live CTS/DSR/DCD/RI indicators in the status bar. Levels are re-applied automatically after an auto-reconnect.
 - 🔧 **Per-Line Signal Inversion**: Invert RTS/DTR/CTS/DSR/DCD/RI independently to correct the active-low behavior common to FTDI, Silicon Labs, and Prolific USB-serial chips — on by default so the status bar matches your multimeter.
-- ⏱️ **RS-485 Pre-TX Delay**: Configurable wait after driving RTS/DE high, before data goes out, to match your transceiver's turn-on time.
+- ⏱️ **RS-485 & Half-Duplex TX Timing**: Configurable pre-TX delay (wait after keying RTS/DE, before data goes out) and post-TX delay (extra hold after the write before releasing the bus) for both modes — on top of an automatic wait for the OS-confirmed TX queue to actually drain, so the bus doesn't release mid-transmission on fast sends.
+- 📌 **Always on Top**: Pin the window above others with a single click in the status bar.
 - 🎨 **ANSI Color Support**: Renders standard ANSI SGR escape codes (foreground/background colors, bold, underline) directly in the terminal view.
 - 📟 **Smart View Modes**: Toggle between **Text**, **Char**, **Hex**, **Bin**, **Dec**, and **Oct** views on the fly.
 - 📋 **Line Selection & Copy**: Click the timestamp gutter to select lines (Shift/Ctrl+click for range/multi-select) and copy with `Ctrl+C` or a floating "Copy Selected" button — works even for lines scrolled off-screen in the virtualized view.

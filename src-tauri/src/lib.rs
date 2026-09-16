@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 
 mod serial_manager;
 
+#[tauri::command]
+fn set_always_on_top(on: bool, window: tauri::Window) -> Result<(), String> {
+    window.set_always_on_top(on).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     Builder::default()
@@ -29,6 +34,9 @@ pub fn run() {
             invert_cd:    Arc::new(AtomicBool::new(true)),
             invert_ri:    Arc::new(AtomicBool::new(true)),
             rs485_pre_delay_ms: Arc::new(AtomicU64::new(0)),
+            rs485_post_delay_ms: Arc::new(AtomicU64::new(0)),
+            half_duplex_pre_delay_ms: Arc::new(AtomicU64::new(0)),
+            half_duplex_post_delay_ms: Arc::new(AtomicU64::new(0)),
         })
         .invoke_handler(tauri::generate_handler![
             serial_manager::list_ports,
@@ -48,7 +56,11 @@ pub fn run() {
             serial_manager::set_invert_cd,
             serial_manager::set_invert_ri,
             serial_manager::set_rs485_pre_delay,
+            serial_manager::set_rs485_post_delay,
+            serial_manager::set_half_duplex_pre_delay,
+            serial_manager::set_half_duplex_post_delay,
             serial_manager::read_modem_lines,
+            set_always_on_top,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

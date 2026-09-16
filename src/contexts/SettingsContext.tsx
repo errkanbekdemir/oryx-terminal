@@ -14,6 +14,7 @@ interface SettingsContextType {
     viewMode: ViewMode; setViewMode: (v: ViewMode) => void;
     theme: 'dark' | 'light'; setTheme: (v: 'dark' | 'light') => void;
     autoScroll: boolean; setAutoScroll: (v: boolean) => void;
+    alwaysOnTop: boolean; setAlwaysOnTop: (v: boolean) => void;
     showMacros: boolean; setShowMacros: (v: boolean) => void;
     macroWidth: number; setMacroWidth: (v: number) => void;
     showTimestamp: boolean; setShowTimestamp: (v: boolean) => void;
@@ -40,6 +41,9 @@ interface SettingsContextType {
     invertCd: boolean; setInvertCd: (v: boolean) => void;
     invertRi: boolean; setInvertRi: (v: boolean) => void;
     rs485PreDelayMs: number; setRs485PreDelayMs: (v: number) => void;
+    rs485PostDelayMs: number; setRs485PostDelayMs: (v: number) => void;
+    halfDuplexPreDelayMs: number; setHalfDuplexPreDelayMs: (v: number) => void;
+    halfDuplexPostDelayMs: number; setHalfDuplexPostDelayMs: (v: number) => void;
     selectedPort: string; setSelectedPort: (v: string) => void;
     // Logging
     logPath: string; setLogPath: (v: string) => void;
@@ -61,6 +65,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [viewMode, setViewMode] = useState<ViewMode>(getSaved('oryx_viewMode', 'text'));
     const [theme, setTheme] = useState<'dark' | 'light'>(getSaved('oryx_theme', 'dark'));
     const [autoScroll, setAutoScroll] = useState(getSaved('oryx_autoScroll', true));
+    const [alwaysOnTop, setAlwaysOnTop] = useState(getSaved('oryx_alwaysOnTop', false));
     const [showMacros, setShowMacros] = useState(getSaved('oryx_showMacros', false));
     const [macroWidth, setMacroWidth] = useState(getSaved('oryx_macroWidth', 256));
     const [showTimestamp, setShowTimestamp] = useState(getSaved('oryx_showTimestamp', true));
@@ -91,6 +96,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [invertCd, setInvertCd] = useState(getSaved('oryx_invertCd', true));
     const [invertRi, setInvertRi] = useState(getSaved('oryx_invertRi', true));
     const [rs485PreDelayMs, setRs485PreDelayMs] = useState(getSaved('oryx_rs485PreDelayMs', 0));
+    const [rs485PostDelayMs, setRs485PostDelayMs] = useState(getSaved('oryx_rs485PostDelayMs', 0));
+    const [halfDuplexPreDelayMs, setHalfDuplexPreDelayMs] = useState(getSaved('oryx_halfDuplexPreDelayMs', 0));
+    const [halfDuplexPostDelayMs, setHalfDuplexPostDelayMs] = useState(getSaved('oryx_halfDuplexPostDelayMs', 0));
     const [selectedPort, setSelectedPort] = useState<string>(getSaved('oryx_selectedPort', ''));
 
     const [logPath, setLogPath] = useState(''); // Do not persist log path to generate a new one each session
@@ -109,6 +117,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         const settings: Record<string, unknown> = {
             oryx_autoScroll: autoScroll,
+            oryx_alwaysOnTop: alwaysOnTop,
             oryx_viewMode: viewMode,
             oryx_showMacros: showMacros,
             oryx_macroWidth: macroWidth,
@@ -134,6 +143,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             oryx_invertCd: invertCd,
             oryx_invertRi: invertRi,
             oryx_rs485PreDelayMs: rs485PreDelayMs,
+            oryx_rs485PostDelayMs: rs485PostDelayMs,
+            oryx_halfDuplexPreDelayMs: halfDuplexPreDelayMs,
+            oryx_halfDuplexPostDelayMs: halfDuplexPostDelayMs,
             oryx_selectedPort: selectedPort,
             oryx_autoReconnect: autoReconnect,
             oryx_reconnectTimeoutSec: reconnectTimeoutSec,
@@ -141,11 +153,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         for (const [key, value] of Object.entries(settings)) {
             localStorage.setItem(key, JSON.stringify(value));
         }
-    }, [autoScroll, viewMode, showMacros, macroWidth, showTimestamp, showEol, maxLines, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakBeforeSequenceEnabled, breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs, selectedPort, autoReconnect, reconnectTimeoutSec]);
+    }, [autoScroll, alwaysOnTop, viewMode, showMacros, macroWidth, showTimestamp, showEol, maxLines, eolSequence, breakMode, breakAfterBytesCount, breakBeforeSequenceValue, breakBeforeSequenceEnabled, breakAfterSequenceValue, breakAfterSequenceEnabled, breakAfterTimeoutMs, dataBits, stopBits, parity, flowControl, invertRts, invertDtr, invertCts, invertDsr, invertCd, invertRi, rs485PreDelayMs, rs485PostDelayMs, halfDuplexPreDelayMs, halfDuplexPostDelayMs, selectedPort, autoReconnect, reconnectTimeoutSec]);
 
     const value: SettingsContextType = {
         viewMode, setViewMode, theme, setTheme,
-        autoScroll, setAutoScroll, showMacros, setShowMacros,
+        autoScroll, setAutoScroll, alwaysOnTop, setAlwaysOnTop, showMacros, setShowMacros,
         macroWidth, setMacroWidth, showTimestamp, setShowTimestamp, showEol, setShowEol,
         maxLines, setMaxLines,
         eolSequence, setEolSequence, breakMode, setBreakMode,
@@ -160,6 +172,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         invertRts, setInvertRts, invertDtr, setInvertDtr,
         invertCts, setInvertCts, invertDsr, setInvertDsr, invertCd, setInvertCd, invertRi, setInvertRi,
         rs485PreDelayMs, setRs485PreDelayMs,
+        rs485PostDelayMs, setRs485PostDelayMs,
+        halfDuplexPreDelayMs, setHalfDuplexPreDelayMs,
+        halfDuplexPostDelayMs, setHalfDuplexPostDelayMs,
         selectedPort, setSelectedPort,
         logPath, setLogPath, isLogging, setIsLogging,
         autoReconnect, setAutoReconnect, reconnectTimeoutSec, setReconnectTimeoutSec,

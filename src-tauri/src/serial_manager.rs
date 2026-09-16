@@ -40,6 +40,20 @@ pub struct SerialState {
     /// RS-485: how long to wait after driving RTS/DE high before writing
     /// data, so the transceiver has time to switch into transmit mode.
     pub rs485_pre_delay_ms: Arc<AtomicU64>,
+    /// RS-485: optional extra hold on RTS/DE after `send_data` already waits
+    /// for the OS-reported TX queue to drain (see `drain_tx`) — covers
+    /// latency the OS can't see, like a USB-serial bridge's own onboard
+    /// buffer. Most setups can leave this at 0.
+    pub rs485_post_delay_ms: Arc<AtomicU64>,
+    /// Half-duplex: extra settle time after the CTS handshake grants the
+    /// channel but before writing — the handshake confirms the peer is
+    /// ready, but some PTT/VOX-keyed radios still need physical ramp-up
+    /// time beyond that before they're actually transmitting cleanly.
+    pub half_duplex_pre_delay_ms: Arc<AtomicU64>,
+    /// Half-duplex: optional extra hold on RTS after `send_data` already
+    /// waits for the OS-reported TX queue to drain (see `drain_tx`) — covers
+    /// latency the OS can't see. Most setups can leave this at 0.
+    pub half_duplex_post_delay_ms: Arc<AtomicU64>,
 }
 
 /// Desired RTS/DTR levels + XOFF gate, shared with the read/reconnect threads
@@ -390,6 +404,9 @@ pub fn open_port(
     invert_cd: bool,
     invert_ri: bool,
     rs485_pre_delay_ms: u64,
+    rs485_post_delay_ms: u64,
+    half_duplex_pre_delay_ms: u64,
+    half_duplex_post_delay_ms: u64,
     app: AppHandle,
     state: State<'_, SerialState>,
 ) -> Result<(), String> {
@@ -406,6 +423,9 @@ pub fn open_port(
     state.invert_cd.store(invert_cd, Ordering::SeqCst);
     state.invert_ri.store(invert_ri, Ordering::SeqCst);
     state.rs485_pre_delay_ms.store(rs485_pre_delay_ms, Ordering::SeqCst);
+    state.rs485_post_delay_ms.store(rs485_post_delay_ms, Ordering::SeqCst);
+    state.half_duplex_pre_delay_ms.store(half_duplex_pre_delay_ms, Ordering::SeqCst);
+    state.half_duplex_post_delay_ms.store(half_duplex_post_delay_ms, Ordering::SeqCst);
 
     let params = RawParams { port_name: port_name.clone(), baud_rate, data_bits, stop_bits, parity, flow_control };
     let mode = parse_flow_mode(&params.flow_control)?;
@@ -485,6 +505,36 @@ async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) -> Result<(), St
     Ok(())
 }
 
+/// Wait for the OS-reported TX queue to actually empty after a write, instead
+/// of trusting `flush()` alone to mean "on the wire". `flush()` maps to
+/// `tcdrain()` on POSIX and `FlushFileBuffers()` on Windows — the latter in
+/// particular is known to return once the driver has accepted the bytes, not
+/// once a USB-serial bridge (FTDI/CP210x/CH340, etc.) has actually clocked
+/// them out. `bytes_to_write()` (`TIOCOUTQ` / `ClearCommError`'s `cbOutQue`)
+/// gives a real, live queue depth to poll instead of guessing a fixed delay.
+/// Same 2 s ceiling as `wait_until`, for the same reason: never block a send
+/// indefinitely if a device disconnects mid-transmit or a driver misreports.
+// Takes `&mut` rather than `&` even though `bytes_to_write` only needs `&self`
+// — `dyn SerialPort` isn't `Sync`, so a shared `&dyn SerialPort` held across
+// the `.await` below would make this function's future non-`Send` (Tauri
+// commands must return `Send` futures). `&mut dyn SerialPort` only needs the
+// port type itself to be `Send`, which it is.
+async fn drain_tx(port: &mut dyn SerialPort) {
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    loop {
+        match port.bytes_to_write() {
+            Ok(0) => return,
+            Err(_) => return, // not supported here — nothing more we can check
+            Ok(_) => {}
+        }
+        if start.elapsed() > TIMEOUT {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// Clone the live port handle and release `state.port` immediately. Clones
 /// share the same underlying OS device — settings and line state written to
 /// one are visible through the others — so every command does its actual
@@ -523,11 +573,32 @@ pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>) -> Result<(
             wait_until(|| !(port.read_carrier_detect().unwrap_or(false) != inv_cd), "carrier detected (DCD high)").await?;
             port.write_request_to_send(true != inv_rts).map_err(|e| e.to_string())?;
             let handshake = wait_until(|| port.read_clear_to_send().unwrap_or(false) != inv_cts, "CTS not asserted").await;
-            let result = handshake.and_then(|_| {
-                port.write_all(&data)
-                    .and_then(|_| port.flush())
-                    .map_err(|e| e.to_string())
-            });
+            // and_then can't await, so branch instead — the handshake only
+            // confirms the peer granted the channel; a keyed-up radio may
+            // still need extra ramp-up/settle time on either side of it.
+            let result = match handshake {
+                Ok(_) => {
+                    let pre_delay = state.half_duplex_pre_delay_ms.load(Ordering::SeqCst);
+                    if pre_delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(pre_delay)).await;
+                    }
+                    let r = port.write_all(&data)
+                        .and_then(|_| port.flush())
+                        .map_err(|e| e.to_string());
+                    if r.is_ok() {
+                        drain_tx(&mut *port).await;
+                        // Optional extra margin on top of the real drain
+                        // wait above, for latency drain_tx can't see (e.g.
+                        // a USB-serial bridge's own onboard buffer).
+                        let post_delay = state.half_duplex_post_delay_ms.load(Ordering::SeqCst);
+                        if post_delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(post_delay)).await;
+                        }
+                    }
+                    r
+                }
+                Err(e) => Err(e),
+            };
             let _ = port.write_request_to_send(false != inv_rts);
             result
         }
@@ -540,6 +611,17 @@ pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>) -> Result<(
             let result = port.write_all(&data)
                 .and_then(|_| port.flush()) // drain before releasing the bus
                 .map_err(|e| e.to_string());
+            if result.is_ok() {
+                drain_tx(&mut *port).await;
+                // Optional extra margin on top of the real drain wait above,
+                // for latency drain_tx can't see (e.g. a USB-serial bridge's
+                // own onboard buffer clocking bytes out after the OS-level
+                // queue already reports empty).
+                let post_delay = state.rs485_post_delay_ms.load(Ordering::SeqCst);
+                if post_delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(post_delay)).await;
+                }
+            }
             let _ = port.write_request_to_send(false != inv_rts);
             result
         }
@@ -626,6 +708,24 @@ pub fn set_invert_dtr(invert: bool, state: State<'_, SerialState>) -> Result<(),
 #[tauri::command]
 pub fn set_rs485_pre_delay(delay_ms: u64, state: State<'_, SerialState>) -> Result<(), String> {
     state.rs485_pre_delay_ms.store(delay_ms, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_rs485_post_delay(delay_ms: u64, state: State<'_, SerialState>) -> Result<(), String> {
+    state.rs485_post_delay_ms.store(delay_ms, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_half_duplex_pre_delay(delay_ms: u64, state: State<'_, SerialState>) -> Result<(), String> {
+    state.half_duplex_pre_delay_ms.store(delay_ms, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_half_duplex_post_delay(delay_ms: u64, state: State<'_, SerialState>) -> Result<(), String> {
+    state.half_duplex_post_delay_ms.store(delay_ms, Ordering::SeqCst);
     Ok(())
 }
 
