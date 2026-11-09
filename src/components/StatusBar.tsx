@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, ReactNode } from 'react';
-import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText, Pin } from 'lucide-react';
+import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText, Pin, Globe } from 'lucide-react';
 import { Dropdown } from './Dropdown';
 import { useSettings } from '../contexts/SettingsContext';
 import { useModemLines } from '../hooks/useModemLines';
@@ -98,6 +98,7 @@ interface StatusBarProps {
     isConnected: boolean;
     isReconnecting: boolean;
     reconnectElapsed: number;
+    remoteLabel: string | null;
     onOpenSettings: () => void;
     onClear: () => void;
     onOpenHelp: () => void;
@@ -107,6 +108,7 @@ export function StatusBar({
     isConnected,
     isReconnecting,
     reconnectElapsed,
+    remoteLabel,
     onOpenSettings,
     onClear,
     onOpenHelp,
@@ -118,7 +120,7 @@ export function StatusBar({
         reconnectTimeoutSec, isLogging, setIsLogging,
     } = useSettings();
 
-    const { modemLines, rts, dtr, setRts, setDtr } = useModemLines(isConnected && !isReconnecting);
+    const { modemLines, rts, dtr, setRts, setDtr } = useModemLines(isConnected && !isReconnecting && !remoteLabel);
     const [containerRef, containerWidth] = useElementWidth<HTMLDivElement>();
 
     // True content-fit measurement instead of guessed pixel breakpoints: each
@@ -164,10 +166,11 @@ export function StatusBar({
                 ? <RefreshCw size={10} className="animate-spin text-amber-500" />
                 : <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
             }
-            <span className="truncate max-w-[160px]">
+            {remoteLabel && <Globe size={10} className="shrink-0" />}
+            <span className="truncate max-w-[220px]" title={remoteLabel ? `Remote (encrypted): ${remoteLabel}` : undefined}>
                 {isReconnecting
                     ? `Reconnecting ${reconnectElapsed}s${reconnectTimeoutSec > 0 ? `/${reconnectTimeoutSec}s` : ''}...`
-                    : isConnected ? selectedPort : 'Disconnected'
+                    : isConnected ? (remoteLabel ?? selectedPort) : 'Disconnected'
                 }
             </span>
         </div>

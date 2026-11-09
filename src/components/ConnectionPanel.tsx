@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { RefreshCw, Play, Square, Settings as SettingsIcon, ChevronDown } from 'lucide-react';
+import { RefreshCw, Play, Square, Settings as SettingsIcon, ChevronDown, Radar } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 
 interface SerialPortInfo {
@@ -9,17 +9,62 @@ interface SerialPortInfo {
     description: string;
 }
 
+interface DiscoveredShare {
+    name: string;
+    host: string;
+    address: string;
+    serial_port: string;
+    baud: string;
+}
+
+type ConnMode = 'serial' | 'remote';
+
+const readLocal = <T,>(key: string, fallback: T): T => {
+    try {
+        const v = localStorage.getItem(key);
+        return v ? JSON.parse(v) : fallback;
+    } catch {
+        return fallback;
+    }
+};
+
 interface ConnectionPanelProps {
     isConnected: boolean;
     isReconnecting: boolean;
     onConnect: (port: string, baud: number) => void;
+    onConnectRemote: (address: string, token: string) => void;
     onDisconnect: () => void;
     onOpenSettings: () => void;
 }
 
 export function ConnectionPanel({
-    isConnected, isReconnecting, onConnect, onDisconnect, onOpenSettings,
+    isConnected, isReconnecting, onConnect, onConnectRemote, onDisconnect, onOpenSettings,
 }: ConnectionPanelProps) {
+    const [mode, setMode] = useState<ConnMode>(() => readLocal('oryx_connMode', 'serial'));
+    const [remoteAddress, setRemoteAddress] = useState<string>(() => readLocal('oryx_remoteAddress', ''));
+    const [remoteToken, setRemoteToken] = useState<string>(() => readLocal('oryx_remoteToken', ''));
+    const [shares, setShares] = useState<DiscoveredShare[]>([]);
+    const [scanning, setScanning] = useState(false);
+    const [isShareListOpen, setIsShareListOpen] = useState(false);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem('oryx_connMode', JSON.stringify(mode));
+            localStorage.setItem('oryx_remoteAddress', JSON.stringify(remoteAddress));
+            localStorage.setItem('oryx_remoteToken', JSON.stringify(remoteToken));
+        } catch { /* ignore */ }
+    }, [mode, remoteAddress, remoteToken]);
+
+    const scanShares = async () => {
+        setScanning(true);
+        try {
+            setShares(await invoke<DiscoveredShare[]>('discover_shares'));
+        } catch (e) {
+            console.error('Discovery failed:', e);
+        } finally {
+            setScanning(false);
+        }
+    };
     const { selectedPort, setSelectedPort } = useSettings();
     const selectedPortRef = useRef(selectedPort);
 
@@ -72,7 +117,7 @@ export function ConnectionPanel({
 
     // Auto port refresh when not connected or reconnecting
     useEffect(() => {
-        if (isConnected || isReconnecting) return; // Don't refresh while connected or reconnecting
+        if (isConnected || isReconnecting || mode === 'remote') return;
 
         const interval = setInterval(async () => {
             try {
@@ -101,7 +146,102 @@ export function ConnectionPanel({
         }, 2000); // Check every 2 seconds
 
         return () => clearInterval(interval);
-    }, [isConnected, setSelectedPort]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isConnected, mode, setSelectedPort]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const locked = isConnected || isReconnecting;
+    const inputClass = 'bg-white dark:bg-[#1a1c20] border border-gray-300 dark:border-gray-700 rounded-lg pl-4 py-2.5 text-sm font-bold text-gray-900 dark:text-white shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all h-[42px] focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-60 disabled:cursor-not-allowed';
+
+    const modeToggle = (
+        <div className="flex items-center rounded-md bg-gray-100 dark:bg-white/5 p-0.5">
+            {(['serial', 'remote'] as const).map(m => (
+                <button
+                    key={m}
+                    onClick={() => setMode(m)}
+                    disabled={locked}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide transition-all disabled:cursor-not-allowed ${mode === m
+                        ? 'bg-white dark:bg-[#1a1c20] text-blue-600 dark:text-blue-400 shadow-sm'
+                        : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                >
+                    {m}
+                </button>
+            ))}
+        </div>
+    );
+
+    const remoteFields = (
+        <>
+            <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-3 ml-1">
+                    <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Remote Share</label>
+                    {modeToggle}
+                </div>
+                <div className="relative">
+                    <input
+                        type="text"
+                        value={remoteAddress}
+                        onChange={(e) => setRemoteAddress(e.target.value)}
+                        disabled={locked}
+                        placeholder="host or ip:port"
+                        className={`${inputClass} w-full pr-20 min-w-[280px]`}
+                    />
+                    <button
+                        onClick={() => { if (!locked) { setIsShareListOpen(!isShareListOpen); if (!isShareListOpen) scanShares(); } }}
+                        disabled={locked}
+                        className="absolute right-9 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-white/10 rounded-md transition-all disabled:opacity-30"
+                        title="Shares found on the network"
+                    >
+                        <ChevronDown size={14} />
+                    </button>
+                    <button
+                        onClick={() => { setIsShareListOpen(true); scanShares(); }}
+                        disabled={locked || scanning}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 hover:bg-gray-100 dark:hover:bg-white/10 rounded-md transition-all text-gray-500 hover:text-blue-600 dark:text-gray-400 disabled:opacity-30"
+                        title="Scan network for ORYX shares"
+                    >
+                        <Radar size={14} className={scanning ? 'animate-pulse text-blue-500' : ''} />
+                    </button>
+
+                    {isShareListOpen && !locked && (
+                        <>
+                            <div className="fixed inset-0 z-40" onClick={() => setIsShareListOpen(false)} />
+                            <ul className="absolute top-full left-0 mt-1 w-full bg-white dark:bg-[#1a1c20] border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl max-h-[240px] overflow-y-auto z-50 py-1">
+                                {shares.length === 0 ? (
+                                    <li className="px-4 py-2 text-sm text-gray-400 italic">
+                                        {scanning ? 'Scanning the network...' : 'No shares found — type an address above'}
+                                    </li>
+                                ) : shares.map(s => (
+                                    <li
+                                        key={s.address}
+                                        onClick={() => { setRemoteAddress(s.address); setIsShareListOpen(false); }}
+                                        className={`px-4 py-2 text-sm cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-900/20 text-gray-700 dark:text-gray-200 ${remoteAddress === s.address ? 'bg-blue-50 dark:bg-blue-900/30' : ''}`}
+                                    >
+                                        <div className="flex flex-col">
+                                            <span className="font-medium">{s.host || s.name} — {s.serial_port}</span>
+                                            <span className="text-xs text-gray-500 dark:text-gray-400">{s.address}{s.baud ? ` · ${s.baud} baud` : ''}</span>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </>
+                    )}
+                </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide ml-1">Token</label>
+                <input
+                    type="password"
+                    value={remoteToken}
+                    onChange={(e) => setRemoteToken(e.target.value)}
+                    disabled={locked}
+                    placeholder="XXXX-XXXX-XXXX-XXXX"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className={`${inputClass} w-[220px] pr-4 font-mono`}
+                />
+            </div>
+        </>
+    );
 
     return (
         <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-6 px-6 py-4 bg-white/70 dark:bg-[#2b2d31]/70 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/5 shadow-[0_4px_20px_-5px_rgba(0,0,0,0.1)] animate-toolbar transition-all duration-300 select-none">
@@ -113,9 +253,13 @@ export function ConnectionPanel({
 
             {/* SETTINGS GROUP (LEFT) */}
             <div className="flex items-center gap-6">
+                {mode === 'remote' ? remoteFields : (<>
                 {/* Port Selection - Custom Dropdown */}
                 <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide ml-1">Serial Port</label>
+                    <div className="flex items-center justify-between gap-3 ml-1">
+                        <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Serial Port</label>
+                        {modeToggle}
+                    </div>
                     <div className="relative">
                         {/* Editable so a device the OS doesn't enumerate as a
                             registered serial port (e.g. a socat/virtual pty
@@ -246,6 +390,7 @@ export function ConnectionPanel({
                         )}
                     </div>
                 </div>
+                </>)}
             </div>
 
             {/* ACTIONS GROUP (RIGHT) */}
@@ -260,8 +405,10 @@ export function ConnectionPanel({
                 </button>
 
                 <button
-                    onClick={() => (isConnected || isReconnecting) ? onDisconnect() : onConnect(selectedPort, baudRate)}
-                    disabled={!selectedPort && !isConnected && !isReconnecting}
+                    onClick={() => locked
+                        ? onDisconnect()
+                        : mode === 'remote' ? onConnectRemote(remoteAddress, remoteToken) : onConnect(selectedPort, baudRate)}
+                    disabled={!locked && (mode === 'remote' ? !remoteAddress.trim() || !remoteToken.trim() : !selectedPort)}
                     className={`relative flex items-center gap-3 px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg transition-all transform active:scale-95 overflow-hidden group/btn ${isReconnecting
                             ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
                             : isConnected

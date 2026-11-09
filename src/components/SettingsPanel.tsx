@@ -4,15 +4,17 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { X, Settings as SettingsIcon } from 'lucide-react';
 import clsx from 'clsx';
 import { Dropdown } from './Dropdown';
+import { SharePanel } from './SharePanel';
 import { useSettings } from '../contexts/SettingsContext';
 
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
     isConnected: boolean;
+    isRemote: boolean;
 }
 
-export function SettingsPanel({ isOpen, onClose, isConnected }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, isConnected, isRemote }: SettingsPanelProps) {
     const {
         dataBits, setDataBits, stopBits, setStopBits, parity, setParity,
         flowControl, setFlowControl, invertRts, setInvertRts, invertDtr, setInvertDtr,
@@ -732,6 +734,8 @@ In RS-232, logical HIGH is a negative voltage and LOW is positive. USB-TTL chips
                             )}
                         </div>
                     </section>
+
+                    <SharePanel isConnected={isConnected} isRemote={isRemote} />
                 </div>
 
                 {/* Footer */}

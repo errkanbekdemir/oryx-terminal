@@ -2,7 +2,7 @@
   "name": "oryx",
   "private": true,
   "description": "Premium high-performance serial terminal built with Tauri and React",
-  "version": "1.9.2",
+  "version": "1.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

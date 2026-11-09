@@ -18,6 +18,11 @@ interface SerialPayload {
   data: number[];
 }
 
+interface RemoteConnectResult {
+  address: string;
+  info: { host: string; port_name: string; baud: number; serial_connected: boolean };
+}
+
 // ─── Module-level pure helpers ────────────────────────────────────────────────
 
 const generateId = () =>
@@ -105,6 +110,11 @@ function App() {
   const [isResizing, setIsResizing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  // Set while connected to another Oryx's share instead of a local port
+  const [remoteLabel, setRemoteLabel] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isConnected && !isReconnecting) setRemoteLabel(null);
+  }, [isConnected, isReconnecting]);
 
   // Buffers
   const bufferRef = useRef<number[]>([]);
@@ -551,6 +561,21 @@ function App() {
     }
   };
 
+  const handleConnectRemote = async (address: string, token: string) => {
+    try {
+      const res = await invoke<RemoteConnectResult>('connect_remote', { address, token });
+      setRemoteLabel(`${res.info.port_name} @ ${res.address}`);
+      setIsConnected(true);
+      ansiStateRef.current = DEFAULT_ANSI_STATE;
+      addLog(`Connected to remote share ${res.address} — ${res.info.port_name} at ${res.info.baud} baud on ${res.info.host} (encrypted).`, 'system');
+      if (!res.info.serial_connected) {
+        addLog('[REMOTE] The shared serial port is currently disconnected on the remote side.', 'error');
+      }
+    } catch (e) {
+      addLog(`Failed to connect to remote: ${e}`, 'error');
+    }
+  };
+
   const handleDisconnect = async () => {
     if (reconnectElapsedIntervalRef.current) {
       clearInterval(reconnectElapsedIntervalRef.current);
@@ -624,6 +649,7 @@ function App() {
         isConnected={isConnected}
         isReconnecting={isReconnecting}
         onConnect={handleConnect}
+        onConnectRemote={handleConnectRemote}
         onDisconnect={handleDisconnect}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -683,6 +709,7 @@ function App() {
         isConnected={isConnected}
         isReconnecting={isReconnecting}
         reconnectElapsed={reconnectElapsed}
+        remoteLabel={remoteLabel}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onClear={handleClear}
         onOpenHelp={() => setIsHelpOpen(true)}
@@ -691,7 +718,9 @@ function App() {
       <SettingsPanel
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        isConnected={isConnected}
+        // Serial-only settings must not be pushed down a remote link
+        isConnected={isConnected && !remoteLabel}
+        isRemote={!!remoteLabel}
       />
 
       <HelpOverlay

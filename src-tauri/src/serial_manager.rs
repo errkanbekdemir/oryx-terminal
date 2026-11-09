@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use std::thread;
 use std::io::{Read, Write};
+use crate::remote_bridge::BridgeState;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,10 @@ pub struct SerialState {
     /// which will make the same check itself once it's done. This makes the
     /// *last* send in a burst the one responsible for the final drop.
     pub tx_key_epoch: Arc<AtomicU64>,
+    /// Copy of every RX chunk for the remote-share bridge. Survives
+    /// reconnects; a send with no subscribers is a cheap no-op.
+    pub rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
+    pub active_baud: Arc<AtomicU64>,
 }
 
 /// Desired RTS/DTR levels + XOFF gate, shared with the read/reconnect threads
@@ -141,8 +146,8 @@ pub struct RawParams {
 }
 
 #[derive(serde::Serialize, Clone)]
-struct Payload {
-    data: Vec<u8>,
+pub(crate) struct Payload {
+    pub(crate) data: Vec<u8>,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -251,6 +256,7 @@ fn spawn_read_thread(
     params: RawParams,
     lines: LineCtl,
     flow_mode: Arc<Mutex<FlowMode>>,
+    rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) {
     thread::spawn(move || {
         let mut buf = vec![0u8; 1000];
@@ -282,6 +288,9 @@ fn spawn_read_thread(
                     };
 
                     if !chunk.is_empty() {
+                        if rx_tap.receiver_count() > 0 {
+                            let _ = rx_tap.send(chunk.clone());
+                        }
                         if app.emit("serial-data", Payload { data: chunk }).is_err() {
                             break; // Window closed
                         }
@@ -313,7 +322,8 @@ fn spawn_read_thread(
                             let app             = app.clone();
                             let lines           = lines.clone();
                             let flow_mode       = flow_mode.clone();
-                            move || reconnect_loop(reconnecting, running, port_arc, active_port_arc, params, app, lines, flow_mode)
+                            let rx_tap          = rx_tap.clone();
+                            move || reconnect_loop(reconnecting, running, port_arc, active_port_arc, params, app, lines, flow_mode, rx_tap)
                         });
                     }
                     break;
@@ -332,6 +342,7 @@ fn reconnect_loop(
     app: AppHandle,
     lines: LineCtl,
     flow_mode: Arc<Mutex<FlowMode>>,
+    rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) {
     loop {
         // Check for abort before sleeping
@@ -367,7 +378,7 @@ fn reconnect_loop(
                         app.emit("serial-reconnected", params.port_name.clone()).ok();
 
                         // Restart the read thread with fresh state
-                        spawn_read_thread(read_port, app, running, reconnecting, port_arc, active_port_arc, params, lines, flow_mode);
+                        spawn_read_thread(read_port, app, running, reconnecting, port_arc, active_port_arc, params, lines, flow_mode, rx_tap);
                         break;
                     }
                     Err(_) => { /* try_clone failed, keep looping */ }
@@ -428,12 +439,17 @@ pub fn open_port(
     half_duplex_post_delay_ms: u64,
     app: AppHandle,
     state: State<'_, SerialState>,
+    bridge: State<'_, BridgeState>,
 ) -> Result<(), String> {
+    if bridge.is_remote_active() {
+        return Err("Disconnect from the remote share first".to_string());
+    }
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
 
     if port_guard.is_some() {
         return Err("Port already open".to_string());
     }
+    state.active_baud.store(baud_rate as u64, Ordering::SeqCst);
 
     state.invert_rts.store(invert_rts, Ordering::SeqCst);
     state.invert_dtr.store(invert_dtr, Ordering::SeqCst);
@@ -483,13 +499,19 @@ pub fn open_port(
         params,
         lines,
         state.flow_mode.clone(),
+        state.rx_tap.clone(),
     );
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
+pub fn close_port(state: State<'_, SerialState>, bridge: State<'_, BridgeState>) -> Result<(), String> {
+    // Also tears down any remote session or share — the frontend's disconnect,
+    // reconnect-timeout and no-auto-reconnect paths all funnel through here.
+    bridge.stop_remote();
+    bridge.stop_share();
+
     // Stop both the read thread and any ongoing reconnect
     state.running.store(false, Ordering::SeqCst);
     state.reconnecting.store(false, Ordering::SeqCst);
@@ -607,7 +629,16 @@ fn clone_port(port_arc: &Mutex<Option<Box<dyn SerialPort>>>) -> Result<Box<dyn S
 }
 
 #[tauri::command]
-pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>) -> Result<(), String> {
+pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>, bridge: State<'_, BridgeState>) -> Result<(), String> {
+    if let Some(tx) = bridge.remote_sender()? {
+        return tx.send(data).map_err(|_| "Remote link is down".to_string());
+    }
+    send_data_inner(data, &state).await
+}
+
+/// Local TX with full flow-control semantics — shared by the `send_data`
+/// command and the remote-share bridge so remote TX honors RS-485 keying etc.
+pub async fn send_data_inner(data: Vec<u8>, state: &SerialState) -> Result<(), String> {
     let mode = *state.flow_mode.lock().map_err(|e| e.to_string())?;
 
     // Software gate: a received XOFF pauses TX until the peer sends XON

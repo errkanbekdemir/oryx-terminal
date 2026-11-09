@@ -2,6 +2,7 @@ use tauri::Builder;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
+mod remote_bridge;
 mod serial_manager;
 
 #[tauri::command]
@@ -40,7 +41,10 @@ pub fn run() {
             tx_key_lock: Arc::new(tokio::sync::Mutex::new(())),
             tx_keyed: Arc::new(AtomicBool::new(false)),
             tx_key_epoch: Arc::new(AtomicU64::new(0)),
+            rx_tap: tokio::sync::broadcast::channel(256).0,
+            active_baud: Arc::new(AtomicU64::new(0)),
         })
+        .manage(remote_bridge::BridgeState::default())
         .invoke_handler(tauri::generate_handler![
             serial_manager::list_ports,
             serial_manager::open_port,
@@ -63,6 +67,11 @@ pub fn run() {
             serial_manager::set_half_duplex_pre_delay,
             serial_manager::set_half_duplex_post_delay,
             serial_manager::read_modem_lines,
+            remote_bridge::start_share,
+            remote_bridge::stop_share,
+            remote_bridge::get_share_status,
+            remote_bridge::connect_remote,
+            remote_bridge::discover_shares,
             set_always_on_top,
         ])
         .run(tauri::generate_context!())
