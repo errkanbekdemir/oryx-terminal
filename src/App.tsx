@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { useTauriEvent } from './hooks/useTauriEvent';
 import { documentDir, join } from '@tauri-apps/api/path';
 import { ConnectionPanel } from './components/ConnectionPanel';
 import { StatusBar } from './components/StatusBar';
@@ -414,78 +414,70 @@ function App() {
   }, [addLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Serial data listener ─────────────────────────────────────────────────
-  useEffect(() => {
-    const unlisten = listen<SerialPayload>('serial-data', (event) => {
-      // Indexed loop, not push(...spread): a large payload as spread arguments
-      // overflows the call stack (RangeError) — the reconnect-burst crash.
-      const buf = bufferRef.current;
-      const data = event.payload.data;
-      for (let i = 0; i < data.length; i++) buf.push(data[i]);
-      if (buf.length > MAX_BUFFER) {
-        buf.splice(0, buf.length - MAX_BUFFER);
-      }
-      lastReceiveTime.current = Date.now();
-    });
-    return () => { unlisten.then(f => f()); };
-  }, []);
+  useTauriEvent<SerialPayload>('serial-data', (payload) => {
+    // Indexed loop, not push(...spread): a large payload as spread arguments
+    // overflows the call stack (RangeError) — the reconnect-burst crash.
+    const buf = bufferRef.current;
+    const data = payload.data;
+    for (let i = 0; i < data.length; i++) buf.push(data[i]);
+    if (buf.length > MAX_BUFFER) {
+      buf.splice(0, buf.length - MAX_BUFFER);
+    }
+    lastReceiveTime.current = Date.now();
+  });
 
   // ─── Disconnect / reconnect listeners ─────────────────────────────────────
-  useEffect(() => {
-    const unlistenDisconnect = listen('serial-disconnected', () => {
-      setIsConnected(false);
-      ansiStateRef.current = DEFAULT_ANSI_STATE;
-      addLog('[DISCONNECTED] Port unexpectedly closed.', 'error');
+  useTauriEvent('serial-disconnected', () => {
+    setIsConnected(false);
+    ansiStateRef.current = DEFAULT_ANSI_STATE;
+    addLog('[DISCONNECTED] Port unexpectedly closed.', 'error');
 
-      if (!autoReconnectRef.current) {
-        invoke('close_port').catch(() => {});
-        return;
-      }
+    if (!autoReconnectRef.current) {
+      invoke('close_port').catch(() => {});
+      return;
+    }
 
-      setIsReconnecting(true);
-      reconnectStartTimeRef.current = Date.now();
-      setReconnectElapsed(0);
-      addLog('[RECONNECT] Reconnecting automatically...', 'system');
+    setIsReconnecting(true);
+    reconnectStartTimeRef.current = Date.now();
+    setReconnectElapsed(0);
+    addLog('[RECONNECT] Reconnecting automatically...', 'system');
 
-      reconnectElapsedIntervalRef.current = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - reconnectStartTimeRef.current) / 1000);
-        setReconnectElapsed(elapsed);
+    reconnectElapsedIntervalRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - reconnectStartTimeRef.current) / 1000);
+      setReconnectElapsed(elapsed);
 
-        if (reconnectTimeoutSecRef.current > 0 && elapsed >= reconnectTimeoutSecRef.current) {
-          clearInterval(reconnectElapsedIntervalRef.current!);
-          reconnectElapsedIntervalRef.current = null;
-          setIsReconnecting(false);
-          setReconnectElapsed(0);
-          invoke('close_port').catch(() => {});
-          addLog(`[RECONNECT FAILED] Timed out after ${reconnectTimeoutSecRef.current}s.`, 'error');
-        }
-      }, 1000);
-    });
-
-    const unlistenReconnected = listen<string>('serial-reconnected', (event) => {
-      if (reconnectElapsedIntervalRef.current) {
-        clearInterval(reconnectElapsedIntervalRef.current);
+      if (reconnectTimeoutSecRef.current > 0 && elapsed >= reconnectTimeoutSecRef.current) {
+        clearInterval(reconnectElapsedIntervalRef.current!);
         reconnectElapsedIntervalRef.current = null;
+        setIsReconnecting(false);
+        setReconnectElapsed(0);
+        invoke('close_port').catch(() => {});
+        addLog(`[RECONNECT FAILED] Timed out after ${reconnectTimeoutSecRef.current}s.`, 'error');
       }
-      setIsReconnecting(false);
-      setReconnectElapsed(0);
-      setIsConnected(true);
-      // Restore selected port after reconnect
-      if (event.payload) {
-        setSelectedPort(event.payload);
-      }
-      addLog('[RECONNECTED] Successfully reconnected.', 'system');
-    });
+    }, 1000);
+  });
 
+  useTauriEvent<string>('serial-reconnected', (portName) => {
+    if (reconnectElapsedIntervalRef.current) {
+      clearInterval(reconnectElapsedIntervalRef.current);
+      reconnectElapsedIntervalRef.current = null;
+    }
+    setIsReconnecting(false);
+    setReconnectElapsed(0);
+    setIsConnected(true);
+    if (portName) setSelectedPort(portName);
+    addLog('[RECONNECTED] Successfully reconnected.', 'system');
+  });
+
+  // Clear the reconnect elapsed interval if the component unmounts mid-reconnect
+  useEffect(() => {
     return () => {
-      unlistenDisconnect.then(f => f());
-      unlistenReconnected.then(f => f());
-      // Clear the reconnect elapsed interval if the component unmounts mid-reconnect
       if (reconnectElapsedIntervalRef.current) {
         clearInterval(reconnectElapsedIntervalRef.current);
         reconnectElapsedIntervalRef.current = null;
       }
     };
-  }, [addLog]);
+  }, []);
 
   // ─── Save-to-macro window event ───────────────────────────────────────────
   useEffect(() => {
