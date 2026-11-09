@@ -2379,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "oryx"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "serde",
  "serde_json",
