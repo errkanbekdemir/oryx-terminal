@@ -44,5 +44,9 @@ sedi "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
 sedi "s/^_tag=.*/\_tag=\"$VERSION\"/" PKGBUILD
 echo "  PKGBUILD              ✓"
 
+# README.md — version badge
+sedi "s/version-[0-9]*\.[0-9]*\.[0-9]*-blue/version-$VERSION-blue/" README.md
+echo "  README.md             ✓"
+
 echo ""
 echo "Version updated to $VERSION in all files."
