@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { RefreshCw, Play, Square, Settings as SettingsIcon, ChevronDown, Radar } from 'lucide-react';
+import { RefreshCw, Play, Square, Settings as SettingsIcon, ChevronDown, Radar, Eye, EyeOff } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 
 interface SerialPortInfo {
@@ -32,7 +32,7 @@ interface ConnectionPanelProps {
     isConnected: boolean;
     isReconnecting: boolean;
     onConnect: (port: string, baud: number) => void;
-    onConnectRemote: (address: string, token: string) => void;
+    onConnectRemote: (address: string, token: string) => Promise<void>;
     onDisconnect: () => void;
     onOpenSettings: () => void;
 }
@@ -46,6 +46,22 @@ export function ConnectionPanel({
     const [shares, setShares] = useState<DiscoveredShare[]>([]);
     const [scanning, setScanning] = useState(false);
     const [isShareListOpen, setIsShareListOpen] = useState(false);
+    // Remote handshake can take several seconds (unreachable host → timeout)
+    const [connecting, setConnecting] = useState(false);
+    const [showToken, setShowToken] = useState(false);
+    // Re-hide once connected so the token isn't left on screen (screen sharing etc.)
+    useEffect(() => {
+        if (isConnected) setShowToken(false);
+    }, [isConnected]);
+
+    const connectRemote = async () => {
+        setConnecting(true);
+        try {
+            await onConnectRemote(remoteAddress, remoteToken);
+        } finally {
+            setConnecting(false);
+        }
+    };
 
     useEffect(() => {
         try {
@@ -148,7 +164,7 @@ export function ConnectionPanel({
         return () => clearInterval(interval);
     }, [isConnected, mode, setSelectedPort]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const locked = isConnected || isReconnecting;
+    const locked = isConnected || isReconnecting || connecting;
     const inputClass = 'bg-white dark:bg-[#1a1c20] border border-gray-300 dark:border-gray-700 rounded-lg pl-4 py-2.5 text-sm font-bold text-gray-900 dark:text-white shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all h-[42px] focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-60 disabled:cursor-not-allowed';
 
     const modeToggle = (
@@ -229,16 +245,26 @@ export function ConnectionPanel({
 
             <div className="flex flex-col gap-1.5">
                 <label className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wide ml-1">Token</label>
-                <input
-                    type="password"
-                    value={remoteToken}
-                    onChange={(e) => setRemoteToken(e.target.value)}
-                    disabled={locked}
-                    placeholder="XXXX-XXXX-XXXX-XXXX"
-                    autoComplete="off"
-                    spellCheck={false}
-                    className={`${inputClass} w-[220px] pr-4 font-mono`}
-                />
+                <div className="relative">
+                    <input
+                        type={showToken ? 'text' : 'password'}
+                        value={remoteToken}
+                        onChange={(e) => setRemoteToken(e.target.value)}
+                        disabled={locked}
+                        placeholder="XXXX-XXXX-XXXX-XXXX"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className={`${inputClass} w-[240px] pr-10 font-mono`}
+                    />
+                    <button
+                        type="button"
+                        onClick={() => setShowToken(!showToken)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-gray-500 dark:text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-white/10 transition-all"
+                        title={showToken ? 'Hide token' : 'Show token'}
+                    >
+                        {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                </div>
             </div>
         </>
     );
@@ -405,26 +431,26 @@ export function ConnectionPanel({
                 </button>
 
                 <button
-                    onClick={() => locked
+                    onClick={() => (isConnected || isReconnecting)
                         ? onDisconnect()
-                        : mode === 'remote' ? onConnectRemote(remoteAddress, remoteToken) : onConnect(selectedPort, baudRate)}
-                    disabled={!locked && (mode === 'remote' ? !remoteAddress.trim() || !remoteToken.trim() : !selectedPort)}
-                    className={`relative flex items-center gap-3 px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg transition-all transform active:scale-95 overflow-hidden group/btn ${isReconnecting
-                            ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
+                        : mode === 'remote' ? connectRemote() : onConnect(selectedPort, baudRate)}
+                    disabled={connecting || (!isConnected && !isReconnecting && (mode === 'remote' ? !remoteAddress.trim() || !remoteToken.trim() : !selectedPort))}
+                    className={`relative flex items-center gap-3 px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg transition-all transform active:scale-95 overflow-hidden group/btn ${isReconnecting || connecting
+                            ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20 disabled:cursor-wait'
                             : isConnected
                                 ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20'
                                 : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20 disabled:opacity-50 disabled:grayscale disabled:cursor-not-allowed'
                         }`}
                 >
                     <div className="absolute inset-0 bg-white/10 translate-y-full group-hover/btn:translate-y-0 transition-transform duration-300" />
-                    {isReconnecting
+                    {isReconnecting || connecting
                         ? <RefreshCw size={16} className="animate-spin" />
                         : isConnected
                             ? <Square size={16} fill="white" strokeWidth={0} />
                             : <Play size={16} fill="white" strokeWidth={0} />
                     }
                     <span className="relative">
-                        {isReconnecting ? 'Stop Reconnecting' : isConnected ? 'Disconnect' : 'Connect'}
+                        {connecting ? 'Connecting...' : isReconnecting ? 'Stop Reconnecting' : isConnected ? 'Disconnect' : 'Connect'}
                     </span>
                 </button>
             </div>

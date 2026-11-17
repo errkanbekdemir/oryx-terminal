@@ -436,6 +436,17 @@ function App() {
     lastReceiveTime.current = Date.now();
   });
 
+  // TX made on the other end of a network share (the sharer's own sends, or
+  // the remote client's sends as seen by the sharer) — shown as TX here too
+  useTauriEvent<SerialPayload>('remote-tx', (payload) => {
+    const bytes = payload.data;
+    addLog(new TextDecoder().decode(new Uint8Array(bytes)), 'tx', bytes);
+    if (isLoggingRef.current && logPathRef.current) {
+      const encoded = Array.from(new TextEncoder().encode(formatLogLine('tx', bytes, viewModeRef.current)));
+      invoke('log_to_file', { path: logPathRef.current, data: encoded }).catch(e => console.error('TX log error:', e));
+    }
+  });
+
   // ─── Disconnect / reconnect listeners ─────────────────────────────────────
   useTauriEvent('serial-disconnected', () => {
     setIsConnected(false);
@@ -562,6 +573,7 @@ function App() {
   };
 
   const handleConnectRemote = async (address: string, token: string) => {
+    addLog(`Connecting to remote share ${address}...`, 'system');
     try {
       const res = await invoke<RemoteConnectResult>('connect_remote', { address, token });
       setRemoteLabel(`${res.info.port_name} @ ${res.address}`);

@@ -49,6 +49,9 @@ const M_INFO: u8 = 0x02;
 const M_STATUS: u8 = 0x03;
 const M_PING: u8 = 0x04;
 const M_PONG: u8 = 0x05;
+// Share-side local TX mirrored to the client for display. Additive: older
+// peers ignore unknown kinds, so no PROTO_VERSION bump.
+const M_TX: u8 = 0x06;
 
 // 32 symbols, no 0/O/1/I ambiguity — 16 chars = 80 bits, enough that an
 // eavesdropper who captures a handshake can't brute-force it offline.
@@ -371,6 +374,11 @@ pub async fn start_share(
 }
 
 #[tauri::command]
+pub fn new_share_token() -> String {
+    format_token(&generate_token())
+}
+
+#[tauri::command]
 pub fn stop_share(bridge: State<'_, BridgeState>) -> Result<(), String> {
     bridge.stop_share();
     Ok(())
@@ -472,6 +480,7 @@ async fn serve_client(
     };
     let serial = app.state::<SerialState>();
     let mut rx = serial.rx_tap.subscribe();
+    let mut local_tx = serial.tx_tap.subscribe();
 
     let (name, baud, mut alive) = serial_snapshot(&serial);
     let info = RemoteInfo { host: local_hostname(), port_name: name, baud, serial_connected: alive };
@@ -492,6 +501,11 @@ async fn serve_client(
                     Err(broadcast::error::RecvError::Lagged(n)) => eprintln!("share: client lagged, dropped {n} chunks"),
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                r = local_tx.recv() => match r {
+                    Ok(bytes) => { if send_binary(&mut ws, ch.seal(M_TX, &bytes)).await.is_err() { break; } }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
                 m = ws.next() => match m {
                     Some(Ok(Message::Binary(b))) => {
                         last_seen = Instant::now();
@@ -500,8 +514,9 @@ async fn serve_client(
                             M_DATA => {
                                 bytes_in.fetch_add(payload.len() as u64, Ordering::Relaxed);
                                 // Same path as local TX so flow control / RS-485 keying apply
-                                if let Err(e) = send_data_inner(payload, &serial).await {
-                                    eprintln!("share: remote TX failed: {e}");
+                                match send_data_inner(payload.clone(), &serial).await {
+                                    Ok(()) => { app.emit("remote-tx", Payload { data: payload }).ok(); }
+                                    Err(e) => eprintln!("share: remote TX failed: {e}"),
                                 }
                             }
                             M_PING => { if send_binary(&mut ws, ch.seal(M_PONG, &[])).await.is_err() { break; } }
@@ -690,6 +705,7 @@ async fn run_session(
                     let Ok((kind, payload)) = ch.open(&b) else { return SessionEnd::Dropped };
                     match kind {
                         M_DATA => { app.emit("serial-data", Payload { data: payload }).ok(); }
+                        M_TX => { app.emit("remote-tx", Payload { data: payload }).ok(); }
                         M_STATUS => {
                             let alive = payload.first() == Some(&1);
                             connected.store(alive, Ordering::SeqCst);
@@ -820,6 +836,43 @@ mod tests {
 
         // First client still holds the slot
         assert!(client_handshake(&addr, &token).await.err().unwrap().contains("busy"));
+    }
+
+    /// Stand-in share with a simulated hardware loopback (DATA echoed back), for
+    /// exercising external clients like scripts/bridge_stress.py without a device:
+    ///   ORYX_TEST_TOKEN=ABCD-EFGH-JKLM-NPQR cargo test --lib loopback_share_for_clients -- --ignored --nocapture
+    /// Listens on 127.0.0.1:48551 for 5 minutes.
+    #[tokio::test]
+    #[ignore]
+    async fn loopback_share_for_clients() {
+        let token = normalize_token(&std::env::var("ORYX_TEST_TOKEN").unwrap_or_else(|_| "ABCD-EFGH-JKLM-NPQR".into()));
+        assert!(is_valid_token(&token), "ORYX_TEST_TOKEN must be a valid 16-char token");
+        let listener = TcpListener::bind("127.0.0.1:48551").await.unwrap();
+        println!("loopback share on 127.0.0.1:48551, token {}", format_token(&token));
+        let slot = Arc::new(Mutex::new(None));
+        let serve = async {
+            loop {
+                let (stream, peer) = listener.accept().await.unwrap();
+                let (token, slot) = (token.clone(), slot.clone());
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let Some(mut ch) = server_handshake(&mut ws, &token, peer.to_string(), &slot).await else { return };
+                    let info = RemoteInfo { host: "loopback-sim".into(), port_name: "SIM".into(), baud: 115200, serial_connected: true };
+                    let _ = send_binary(&mut ws, ch.seal(M_INFO, &serde_json::to_vec(&info).unwrap())).await;
+                    while let Ok(frame) = recv_binary(&mut ws, PEER_SILENCE_LIMIT).await {
+                        let Ok((kind, payload)) = ch.open(&frame) else { break };
+                        let reply = match kind {
+                            M_DATA => ch.seal(M_DATA, &payload),
+                            M_PING => ch.seal(M_PONG, &[]),
+                            _ => continue,
+                        };
+                        if send_binary(&mut ws, reply).await.is_err() { break; }
+                    }
+                    if let Ok(mut s) = slot.lock() { *s = None; }
+                });
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(300), serve).await;
     }
 
     /// Needs multicast on the host network — run with `cargo test -- --ignored`.

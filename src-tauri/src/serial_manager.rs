@@ -77,6 +77,8 @@ pub struct SerialState {
     /// Copy of every RX chunk for the remote-share bridge. Survives
     /// reconnects; a send with no subscribers is a cheap no-op.
     pub rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
+    /// Copy of locally-initiated TX, mirrored to the remote client's view.
+    pub tx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
     pub active_baud: Arc<AtomicU64>,
 }
 
@@ -622,6 +624,33 @@ fn schedule_rts_release(
 /// hardware flow control with CTS stuck low after a disconnect) wedges every
 /// other command waiting on that same lock: close_port, RTS/DTR toggles,
 /// modem-line polling, even the reconnect path.
+/// `write_all` that survives a full TX buffer. The port's 10 ms timeout (set
+/// for the read loop) also bounds each write — on Windows via
+/// WriteTotalTimeoutConstant, on POSIX via poll — so when the driver/USB
+/// bridge buffer is full a write returns 0 bytes or TimedOut, and plain
+/// `write_all` would drop the whole chunk. Keep retrying while bytes are
+/// draining; give up only after 2 s with no progress at all.
+fn write_all_patient(port: &mut dyn SerialPort, mut data: &[u8]) -> std::io::Result<()> {
+    const STALL_LIMIT: Duration = Duration::from_secs(2);
+    let mut last_progress = std::time::Instant::now();
+    while !data.is_empty() {
+        match port.write(data) {
+            Ok(n) if n > 0 => {
+                data = &data[n..];
+                last_progress = std::time::Instant::now();
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) => {}
+            Err(e) => return Err(e),
+        }
+        if last_progress.elapsed() > STALL_LIMIT {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TX stalled for 2 s (buffer full / flow control?)"));
+        }
+    }
+    Ok(())
+}
+
 fn clone_port(port_arc: &Mutex<Option<Box<dyn SerialPort>>>) -> Result<Box<dyn SerialPort>, String> {
     let port_guard = port_arc.lock().map_err(|e| e.to_string())?;
     let port = port_guard.as_ref().ok_or_else(|| "No port open".to_string())?;
@@ -633,7 +662,12 @@ pub async fn send_data(data: Vec<u8>, state: State<'_, SerialState>, bridge: Sta
     if let Some(tx) = bridge.remote_sender()? {
         return tx.send(data).map_err(|_| "Remote link is down".to_string());
     }
-    send_data_inner(data, &state).await
+    let mirror = (state.tx_tap.receiver_count() > 0).then(|| data.clone());
+    send_data_inner(data, &state).await?;
+    if let Some(bytes) = mirror {
+        let _ = state.tx_tap.send(bytes);
+    }
+    Ok(())
 }
 
 /// Local TX with full flow-control semantics — shared by the `send_data`
@@ -686,7 +720,7 @@ pub async fn send_data_inner(data: Vec<u8>, state: &SerialState) -> Result<(), S
             let my_epoch = state.tx_key_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             let result = match handshake {
                 Ok(_) => {
-                    let r = port.write_all(&data)
+                    let r = write_all_patient(&mut *port, &data)
                         .and_then(|_| port.flush())
                         .map_err(|e| e.to_string());
                     if r.is_ok() {
@@ -719,7 +753,7 @@ pub async fn send_data_inner(data: Vec<u8>, state: &SerialState) -> Result<(), S
             }
 
             let my_epoch = state.tx_key_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-            let result = port.write_all(&data)
+            let result = write_all_patient(&mut *port, &data)
                 .and_then(|_| port.flush()) // drain before releasing the bus
                 .map_err(|e| e.to_string());
             if result.is_ok() {
@@ -731,7 +765,7 @@ pub async fn send_data_inner(data: Vec<u8>, state: &SerialState) -> Result<(), S
             schedule_rts_release(state.port.clone(), state.tx_key_lock.clone(), state.tx_keyed.clone(), state.tx_key_epoch.clone(), my_epoch, post_delay, inv_rts);
             result
         }
-        _ => port.write_all(&data).map_err(|e| e.to_string()),
+        _ => write_all_patient(&mut *port, &data).map_err(|e| e.to_string()),
     }
 }
 

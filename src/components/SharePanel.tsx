@@ -58,6 +58,7 @@ export function SharePanel({ isConnected, isRemote }: SharePanelProps) {
     const [discoverable, setDiscoverable] = useState<boolean>(() => readLocal('oryx_shareDiscoverable', true));
     // Token is kept across sessions so the remote side doesn't need a new one every time
     const [savedToken, setSavedToken] = useState<string | null>(() => readLocal('oryx_shareToken', null));
+    const sharing = status !== null;
 
     useEffect(() => {
         try { localStorage.setItem('oryx_shareDiscoverable', JSON.stringify(discoverable)); } catch { /* ignore */ }
@@ -94,6 +95,38 @@ export function SharePanel({ isConnected, isRemote }: SharePanelProps) {
         }
     };
 
+    // Old token stops working immediately; while sharing this restarts the
+    // share, which disconnects the current client.
+    const regenerate = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+            const token = await invoke<string>('new_share_token');
+            setSavedToken(token);
+            if (status) {
+                await invoke('stop_share');
+                await invoke<ShareInfo>('start_share', { listenPort: status.info.port, token, discoverable: status.info.discoverable });
+            }
+            await refresh();
+        } catch (e) {
+            setError(String(e));
+            await refresh();
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const regenerateButton = (
+        <button
+            onClick={regenerate}
+            disabled={busy}
+            className="p-1 rounded-md text-gray-400 hover:text-amber-500 hover:bg-gray-100 dark:hover:bg-white/10 transition-all disabled:opacity-40"
+            title={sharing ? 'New token — the old one stops working and the connected client is dropped' : 'Generate a new token'}
+        >
+            <RotateCcw size={12} className={busy ? 'animate-spin' : ''} />
+        </button>
+    );
+
     const stop = async () => {
         setBusy(true);
         try {
@@ -103,8 +136,6 @@ export function SharePanel({ isConnected, isRemote }: SharePanelProps) {
             setBusy(false);
         }
     };
-
-    const sharing = status !== null;
 
     return (
         <section>
@@ -129,25 +160,27 @@ export function SharePanel({ isConnected, isRemote }: SharePanelProps) {
                             <span className="text-[10px] text-gray-400 dark:text-gray-500 italic">Announce via mDNS so others can find it with Scan — the token is still required</span>
                         </div>
                     </label>
-                    <div className="flex gap-2">
-                        <button
-                            onClick={start}
-                            disabled={!isConnected || isRemote || busy}
-                            className="flex-1 flex items-center justify-center gap-2 text-sm py-2.5 rounded-xl font-bold bg-blue-500 hover:bg-blue-600 text-white shadow-lg shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
-                        >
-                            <Share2 size={14} /> Start Sharing
-                        </button>
-                        {savedToken && (
-                            <button
-                                onClick={() => setSavedToken(null)}
-                                disabled={busy}
-                                className="px-3 rounded-xl border border-gray-200 dark:border-[#303339] text-gray-500 hover:text-amber-500 hover:border-amber-400 transition-all"
-                                title="Generate a new token next time (revokes the old one)"
-                            >
-                                <RotateCcw size={14} />
-                            </button>
-                        )}
+                    <div className="flex items-center justify-between rounded-xl border border-gray-200 dark:border-[#303339] bg-gray-50 dark:bg-[#1a1c20] px-3 py-2">
+                        <span className="text-[10px] font-bold uppercase text-gray-500 tracking-wide">Token</span>
+                        <div className="flex items-center gap-1">
+                            {savedToken ? (
+                                <>
+                                    <span className="font-mono text-sm font-bold text-gray-800 dark:text-gray-100 select-all">{savedToken}</span>
+                                    <CopyButton text={savedToken} />
+                                </>
+                            ) : (
+                                <span className="text-xs text-gray-400 italic">generated when sharing starts</span>
+                            )}
+                            {regenerateButton}
+                        </div>
                     </div>
+                    <button
+                        onClick={start}
+                        disabled={!isConnected || isRemote || busy}
+                        className="w-full flex items-center justify-center gap-2 text-sm py-2.5 rounded-xl font-bold bg-blue-500 hover:bg-blue-600 text-white shadow-lg shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+                    >
+                        <Share2 size={14} /> Start Sharing
+                    </button>
                     {!isConnected && !isRemote && (
                         <p className="text-[10px] text-gray-400 dark:text-gray-500 italic pl-1">Connect to a serial port first.</p>
                     )}
@@ -164,6 +197,7 @@ export function SharePanel({ isConnected, isRemote }: SharePanelProps) {
                             <div className="flex items-center gap-1">
                                 <span className="font-mono text-sm font-bold text-gray-800 dark:text-gray-100 select-all">{status.info.token}</span>
                                 <CopyButton text={status.info.token} />
+                                {regenerateButton}
                             </div>
                         </div>
                         <div className="flex items-start justify-between gap-4">
