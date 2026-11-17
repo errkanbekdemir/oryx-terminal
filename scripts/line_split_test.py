@@ -12,8 +12,11 @@ the loopback as RX, and ORYX must show each one as a single, unbroken line.
     python3 scripts/line_split_test.py <ip> <TOKEN>                 # watch the ORYX screen
     python3 scripts/line_split_test.py <ip> <TOKEN> --log auto      # also auto-check the log
 
-For the automatic check, start Logging in ORYX (view mode Text) before
-running; `--log auto` picks the newest file in ~/Documents/ORYX_Logs, or
+To test Break mode = Timeout: switch ORYX to a non-text view (Break mode is
+only editable there), set Timeout (e.g. 200 ms) and add
+`--break-timeout 200 --view hex`.
+
+For the automatic check, start Logging in ORYX before running; `--log auto` picks the newest file in ~/Documents/ORYX_Logs, or
 pass the log file path. Disconnect any other client from the share first.
 """
 import argparse
@@ -37,31 +40,49 @@ CASES = [
 ]
 
 
+def timeout_cases(t: int):
+    """For Break mode = Timeout with a timeout of `t` ms (no EOL in the data)."""
+    cases = [
+        ("gap shorter than timeout joins", [b"AB", t // 2, b"CD", t * 3], [b"ABCD"]),
+        ("gap longer than timeout splits", [b"AB", t * 3, b"CD", t * 3], [b"AB", b"CD"]),
+    ]
+    if t > 100:  # the case that used to split at 50 ms regardless of the setting
+        cases.append(("80 ms gap stays inside a longer timeout", [b"xx", 80, b"yy", t * 3], [b"xxyy"]))
+    return cases
+
+
 def marker(i: int, name: str) -> bytes:
     return f"=== CASE {i}: {name} ===\r\n".encode()
 
 
-def escape(line: bytes) -> str:
-    """How ORYX writes an RX line in Text view mode to its log file."""
-    out = []
-    for b in line:
-        out.append({0x0D: "\\r", 0x0A: "\\n", 0x09: "\\t"}.get(b) or (chr(b) if 0x20 <= b <= 0x7E else "."))
-    return "".join(out)
+def escape(line: bytes, view: str = "text") -> str:
+    """How ORYX writes an RX line to its log file in the given view mode (formatLogLine in App.tsx)."""
+    if view == "hex":
+        return " ".join(f"{b:02X}" for b in line)
+    if view == "dec":
+        return " ".join(f"{b:03d}" for b in line)
+    if view == "oct":
+        return " ".join(f"{b:03o}" for b in line)
+    if view == "bin":
+        return " ".join(f"{b:08b}" for b in line)
+    if view == "char":
+        return " ".join(chr(b) if 0x20 <= b <= 0x7E else "." for b in line)
+    return "".join({0x0D: "\\r", 0x0A: "\\n", 0x09: "\\t"}.get(b) or (chr(b) if 0x20 <= b <= 0x7E else ".") for b in line)
 
 
-def check_log(path: str) -> bool:
+def check_log(path: str, cases=CASES, view: str = "text") -> bool:
     with open(path, encoding="utf-8", errors="replace") as f:
         rx = [ln.split(" RX  ", 1)[1].rstrip("\n") for ln in f if " RX  " in ln]
     ok_all = True
-    for i, (name, _, expected) in enumerate(CASES, 1):
+    for i, (name, _, expected) in enumerate(cases, 1):
         try:
-            start = len(rx) - 1 - rx[::-1].index(escape(marker(i, name)))  # last run wins
+            start = len(rx) - 1 - rx[::-1].index(escape(marker(i, name), view))  # last run wins
         except ValueError:
             print(f"  ? case {i} ({name}): marker not found in log")
             ok_all = False
             continue
         got = rx[start + 1:start + 1 + len(expected)]
-        want = [escape(e) for e in expected]
+        want = [escape(e, view) for e in expected]
         if got == want:
             print(f"  PASS case {i}: {name}")
         else:
@@ -83,6 +104,7 @@ def find_log(arg: str, since: float):
 
 async def run(args):
     started = time.time()
+    cases = timeout_cases(args.break_timeout) if args.break_timeout else CASES
     address = normalize_address(args.address)
     print(f"Connecting to ws://{address} ...")
     async with connect(f"ws://{address}", max_size=None, ping_interval=None) as ws:
@@ -102,7 +124,7 @@ async def run(args):
 
         drainer = asyncio.create_task(drain())
         try:
-            for i, (name, parts, expected) in enumerate(CASES, 1):
+            for i, (name, parts, expected) in enumerate(cases, 1):
                 await send(M_DATA, marker(i, name))
                 await asyncio.sleep(0.3)
                 for p in parts:
@@ -113,7 +135,7 @@ async def run(args):
                 shown = expected if len(expected) <= 3 else expected[:2] + [b"...", expected[-1]]
                 print(f"CASE {i}: {name}")
                 for e in shown:
-                    print(f"    expect: {escape(e)}")
+                    print(f"    expect: {escape(e, args.view)}")
                 await asyncio.sleep(0.5)
             await asyncio.sleep(1.5)  # let ORYX close and log the last lines
         finally:
@@ -127,7 +149,7 @@ async def run(args):
             print("\nNo ORYX log written during this run — is Logging on?")
             return 1
         print(f"\nChecking {path}")
-        return 0 if check_log(path) else 1
+        return 0 if check_log(path, cases, args.view) else 1
     return 0
 
 
@@ -136,6 +158,10 @@ def main():
     p.add_argument("address", help="share address, host or host:port")
     p.add_argument("token", help="share token, e.g. ABCD-EFGH-JKLM-NPQR")
     p.add_argument("--log", help="ORYX log file to verify, or 'auto' for the newest in ~/Documents/ORYX_Logs")
+    p.add_argument("--break-timeout", type=int, metavar="MS",
+                   help="run the Break mode = Timeout cases instead; pass the timeout set in ORYX (e.g. 200)")
+    p.add_argument("--view", default="text", choices=["text", "hex", "char", "dec", "oct", "bin"],
+                   help="ORYX view mode during the run, for reading its log (default text)")
     sys.exit(asyncio.run(run(p.parse_args())))
 
 

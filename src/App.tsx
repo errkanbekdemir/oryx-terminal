@@ -65,8 +65,9 @@ function formatLogLine(type: 'rx' | 'tx', bytes: number[], viewMode: string, tim
 }
 
 // An RX line still waiting for its EOL is shown early but kept "open"; past
-// this size it is closed anyway so a stream with no EOL can't grow one line forever.
-const MAX_OPEN_LINE = 4096;
+// this size it is closed anyway so a stream with no EOL can't grow one line
+// forever. Large enough for big timeout-delimited binary frames.
+const MAX_OPEN_LINE = 65536;
 
 // Hard cap on raw RX bytes awaiting flush — beyond this the oldest bytes are
 // dropped so a stalled flush (e.g. slow log write) can't grow memory unbounded.
@@ -281,6 +282,8 @@ function App() {
   // timeout, disconnect).
   const flushBuffer = useCallback(async (mode: 'wait' | 'partial' | 'complete' = 'wait') => {
     if (bufferRef.current.length === 0) return;
+    // Buffer holds only the already-shown open line: nothing new to scan
+    if (mode !== 'complete' && bufferRef.current.length === openRxRef.current?.shown) return;
 
     // Guard: prevent concurrent async flushes (e.g. when log_to_file awaits > 16ms)
     if (flushInProgressRef.current) return;
