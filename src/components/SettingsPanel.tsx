@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
-import { X, Settings as SettingsIcon } from 'lucide-react';
+import { X, Settings as SettingsIcon, FolderOpen } from 'lucide-react';
 import clsx from 'clsx';
 import { Dropdown } from './Dropdown';
 import { SharePanel } from './SharePanel';
@@ -680,6 +680,14 @@ In RS-232, logical HIGH is a negative voltage and LOW is positive. USB-TTL chips
                                         className="px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold border border-gray-200 dark:border-[#303339] transition-colors"
                                     >
                                         Browse
+                                    </button>
+                                    <button
+                                        onClick={() => invoke('open_log_folder', { path: logPath }).catch(e => console.error('Failed to open log folder:', e))}
+                                        disabled={!logPath}
+                                        className="px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg border border-gray-200 dark:border-[#303339] transition-colors disabled:opacity-40"
+                                        title="Open log folder"
+                                    >
+                                        <FolderOpen size={14} />
                                     </button>
                                 </div>
                             </div>

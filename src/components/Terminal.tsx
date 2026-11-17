@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState, useMemo, memo } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import clsx from 'clsx';
-import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock } from 'lucide-react';
+import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock, Search } from 'lucide-react';
 import { parseInput } from '../utils/parser';
 import { parseAnsi, AnsiState, DEFAULT_ANSI_STATE, isDefaultAnsiState } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
+import { TerminalSearchBar, makeSearchRegex, findRanges, highlightText, MATCH_CLASS, ACTIVE_MATCH_CLASS } from './TerminalSearch';
+import { useTauriEvent } from '../hooks/useTauriEvent';
 
 export interface LogEntry {
     id: string;
@@ -244,6 +246,9 @@ interface TerminalRowProps {
     onToggleInspector: () => void;
     onClear: () => void;
     onSendCommand: (command: string) => void;
+    onFind: () => void;
+    searchRe: RegExp | null;
+    isActiveMatch: boolean;
 }
 
 const TerminalRow = memo(function TerminalRow({
@@ -264,6 +269,9 @@ const TerminalRow = memo(function TerminalRow({
     onToggleInspector,
     onClear,
     onSendCommand,
+    onFind,
+    searchRe,
+    isActiveMatch,
 }: TerminalRowProps) {
     const [selectedByteIdx, setSelectedByteIdx] = useState<number | null>(null);
     const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
@@ -292,6 +300,14 @@ const TerminalRow = memo(function TerminalRow({
     const usesAnsiStyling = !isNonTextMode && (lineHasAnsi || !isDefaultAnsiState(ansiStart));
     const isRx = line.type === 'rx';
     const isTx = line.type === 'tx';
+
+    // Search highlighting runs on exactly what this row renders, so the
+    // marked ranges line up whatever the view mode or ANSI styling.
+    const markClass = isActiveMatch ? ACTIVE_MATCH_CLASS : MATCH_CLASS;
+    const ansiSegments = usesAnsiStyling ? parseAnsi(content, ansiStart).segments : null;
+    const searchRanges = searchRe
+        ? findRanges(ansiSegments ? ansiSegments.map(s => s.text).join('') : content, searchRe)
+        : [];
 
     // Compute EOL match once per row
     let hasEolMatch = false;
@@ -374,41 +390,58 @@ const TerminalRow = memo(function TerminalRow({
             <span className="flex-grow whitespace-pre-wrap font-medium font-mono relative px-3 py-0.5">
                 {isNonTextMode ? (
                     isByteMode ? (
-                        line.originalData!.map((byte, bIdx) => (
-                            <span key={bIdx}>
-                                <span
-                                    onClick={(e) => { e.stopPropagation(); setSelectedByteIdx(selectedByteIdx === bIdx ? null : bIdx); setTooltipPos({ x: e.clientX, y: e.clientY }); }}
-                                    className={clsx(
-                                        "rounded px-0.5 transition-colors cursor-pointer select-none",
-                                        selectedByteIdx !== null && bIdx === selectedByteIdx     && "bg-blue-500/30 text-blue-200",
-                                        selectedByteIdx !== null && bIdx === selectedByteIdx + 1 && "bg-blue-500/15",
-                                        selectedByteIdx !== null && (bIdx === selectedByteIdx + 2 || bIdx === selectedByteIdx + 3) && "bg-blue-500/10",
-                                    )}
-                                >
-                                    {formatByte(byte, viewMode)}
-                                </span>
-                                {bIdx < line.originalData!.length - 1 && ' '}
-                            </span>
-                        ))
+                        (() => {
+                            let pos = 0; // offset of each byte within `content` ("XX XX ...")
+                            return line.originalData!.map((byte, bIdx) => {
+                                const label = formatByte(byte, viewMode);
+                                const start = pos;
+                                pos += label.length + 1;
+                                const matched = searchRanges.some(([s, e]) => s < start + label.length && e > start);
+                                return (
+                                    <span key={bIdx}>
+                                        <span
+                                            onClick={(e) => { e.stopPropagation(); setSelectedByteIdx(selectedByteIdx === bIdx ? null : bIdx); setTooltipPos({ x: e.clientX, y: e.clientY }); }}
+                                            className={clsx(
+                                                "rounded px-0.5 transition-colors cursor-pointer select-none",
+                                                matched && markClass,
+                                                selectedByteIdx !== null && bIdx === selectedByteIdx     && "bg-blue-500/30 text-blue-200",
+                                                selectedByteIdx !== null && bIdx === selectedByteIdx + 1 && "bg-blue-500/15",
+                                                selectedByteIdx !== null && (bIdx === selectedByteIdx + 2 || bIdx === selectedByteIdx + 3) && "bg-blue-500/10",
+                                            )}
+                                        >
+                                            {label}
+                                        </span>
+                                        {bIdx < line.originalData!.length - 1 && ' '}
+                                    </span>
+                                );
+                            });
+                        })()
                     ) : (
-                        content
+                        highlightText(content, searchRanges, 0, markClass)
                     )
                 ) : (
-                    usesAnsiStyling ? (
-                        parseAnsi(content, ansiStart).segments.map((segment, idx) => (
-                            <span
-                                key={idx}
-                                style={segment.style}
-                                className={clsx({
-                                    "font-bold": segment.bold,
-                                    "underline": segment.underline
-                                })}
-                            >
-                                {segment.text}
-                            </span>
-                        ))
+                    ansiSegments ? (
+                        (() => {
+                            let offset = 0;
+                            return ansiSegments.map((segment, idx) => {
+                                const segOffset = offset;
+                                offset += segment.text.length;
+                                return (
+                                    <span
+                                        key={idx}
+                                        style={segment.style}
+                                        className={clsx({
+                                            "font-bold": segment.bold,
+                                            "underline": segment.underline
+                                        })}
+                                    >
+                                        {highlightText(segment.text, searchRanges, segOffset, markClass)}
+                                    </span>
+                                );
+                            });
+                        })()
                     ) : (
-                        content
+                        highlightText(content, searchRanges, 0, markClass)
                     )
                 )}
                 {hasEolMatch && (
@@ -458,6 +491,7 @@ const TerminalRow = memo(function TerminalRow({
                         { label: `Copy Selected with Timestamps`, icon: Copy, onClick: () => onCopySelected(true) },
                     ] as const : []),
                     { separator: true },
+                    { label: 'Find… (Ctrl+F)', icon: Search, onClick: onFind },
                     { label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll', icon: MousePointer2, onClick: onToggleAutoScroll },
                     { label: showTimestamp ? 'Hide Timestamp' : 'Show Timestamp', icon: MousePointer2, onClick: onToggleTimestamp },
                     { label: inspectorEnabled ? 'Disable Byte Inspector' : 'Enable Byte Inspector', icon: Binary, onClick: onToggleInspector },
@@ -492,6 +526,49 @@ export function Terminal({
         return saved === null ? true : saved === 'true';
     });
 
+    // ─── Search ──────────────────────────────────────────────────────────────
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [query, setQuery] = useState('');
+    const [debouncedQuery, setDebouncedQuery] = useState('');
+    const [caseSensitive, setCaseSensitive] = useState(false);
+    const [filterOnly, setFilterOnly] = useState(false);
+    const [activeMatchId, setActiveMatchId] = useState<string | null>(null);
+    const [jumpTick, setJumpTick] = useState(0);
+    const searchInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedQuery(query), 150);
+        return () => clearTimeout(t);
+    }, [query]);
+
+    const searchRe = useMemo(
+        () => (searchOpen ? makeSearchRegex(debouncedQuery, caseSensitive) : null),
+        [searchOpen, debouncedQuery, caseSensitive],
+    );
+
+    // Per-entry match cache: entries are immutable (an open line that grows is
+    // replaced by a new object), so only newly arrived lines get tested.
+    const matchCache = useMemo(() => new WeakMap<LogEntry, boolean>(), [searchRe, viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
+    const matchedLines = useMemo(() => {
+        if (!searchRe) return [];
+        return lines.filter(l => {
+            let hit = matchCache.get(l);
+            if (hit === undefined) {
+                const text = viewMode !== 'text' && l.originalData && l.originalData.length > 0
+                    ? formatData(l.originalData, viewMode)
+                    : l.text.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
+                searchRe.lastIndex = 0;
+                hit = searchRe.test(text);
+                matchCache.set(l, hit);
+            }
+            return hit;
+        });
+    }, [lines, searchRe, matchCache, viewMode]);
+
+    const filterActive = filterOnly && searchRe !== null;
+    const viewLines = filterActive ? matchedLines : lines;
+    const viewFirst = filterActive ? 0 : firstItemIndex;
+
     // ─── Line selection (keyed by stable line id — survives trimming) ────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const anchorIdRef = useRef<string | null>(null);
@@ -501,19 +578,92 @@ export function Terminal({
         lines.forEach((l, i) => m.set(l.id, i));
         return m;
     }, [lines]);
+    const viewIdToIndex = useMemo(() => {
+        if (!filterActive) return idToIndex;
+        const m = new Map<string, number>();
+        viewLines.forEach((l, i) => m.set(l.id, i));
+        return m;
+    }, [filterActive, viewLines, idToIndex]);
 
     // Refs so the selection callback stays referentially stable (keeps row memo effective)
     const linesRef = useRef(lines);
     linesRef.current = lines;
-    const idToIndexRef = useRef(idToIndex);
-    idToIndexRef.current = idToIndex;
+    const viewLinesRef = useRef(viewLines);
+    viewLinesRef.current = viewLines;
+    const viewIdToIndexRef = useRef(viewIdToIndex);
+    viewIdToIndexRef.current = viewIdToIndex;
     const viewModeRef = useRef(viewMode);
     viewModeRef.current = viewMode;
 
+    // ─── Search navigation ───────────────────────────────────────────────────
+    const matchedLinesRef = useRef(matchedLines);
+    matchedLinesRef.current = matchedLines;
+    const activeMatchIdRef = useRef(activeMatchId);
+    activeMatchIdRef.current = activeMatchId;
+
+    const jumpTo = useCallback((id: string) => {
+        setActiveMatchId(id);
+        setJumpTick(t => t + 1);
+        // Otherwise the next incoming line yanks the view back to the bottom
+        setAutoScroll(false);
+    }, [setAutoScroll]);
+
+    // dir -1 = older (up), +1 = newer (down); starts from the newest match
+    const stepMatch = useCallback((dir: -1 | 1) => {
+        const matches = matchedLinesRef.current;
+        if (matches.length === 0) return;
+        const pos = matches.findIndex(l => l.id === activeMatchIdRef.current);
+        const next = pos === -1 ? matches.length - 1 : (pos + dir + matches.length) % matches.length;
+        jumpTo(matches[next].id);
+    }, [jumpTo]);
+
+    // A new query jumps to the newest match
+    useEffect(() => {
+        const matches = matchedLinesRef.current;
+        if (searchRe && matches.length > 0) jumpTo(matches[matches.length - 1].id);
+        else setActiveMatchId(null);
+    }, [searchRe]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        const id = activeMatchIdRef.current;
+        if (!id) return;
+        const idx = viewIdToIndexRef.current.get(id);
+        if (idx !== undefined) {
+            virtuosoRef.current?.scrollToIndex({ index: viewFirst + idx, align: 'center', behavior: 'auto' });
+        }
+    }, [jumpTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Toggling the filter remounts the list at the bottom — bring the active match back
+    useEffect(() => {
+        if (activeMatchIdRef.current) setJumpTick(t => t + 1);
+    }, [filterActive]);
+
+    const openSearch = useCallback(() => {
+        setSearchOpen(true);
+        // Focus after the bar mounts; select so typing replaces the last query
+        requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); });
+    }, []);
+
+    const closeSearch = useCallback(() => {
+        setSearchOpen(false);
+        setActiveMatchId(null);
+    }, []);
+
+    const searchOpenRef = useRef(searchOpen);
+    searchOpenRef.current = searchOpen;
+
+    // macOS menu (⌘F / ⌘G / ⇧⌘G) — see mac_menu in src-tauri/src/lib.rs
+    useTauriEvent<string>('menu-find', (action) => {
+        if (action === 'find' || !searchOpenRef.current) openSearch();
+        else stepMatch(action === 'find-next' ? -1 : 1);
+    });
+
+    const activePos = activeMatchId ? matchedLines.findIndex(l => l.id === activeMatchId) + 1 : 0;
+
     const handleSelectLine = useCallback((id: string, mods: { ctrl: boolean; shift: boolean }) => {
         setSelectedIds(prev => {
-            const curLines = linesRef.current;
-            const indexMap = idToIndexRef.current;
+            const curLines = viewLinesRef.current;
+            const indexMap = viewIdToIndexRef.current;
             const next = new Set(prev);
             const anchor = anchorIdRef.current;
             if (mods.shift && anchor !== null && indexMap.has(anchor) && indexMap.has(id)) {
@@ -597,6 +747,17 @@ export function Terminal({
     // Ctrl+Shift+C always copies selected lines, Escape clears the selection
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
+            // Search keys work from anywhere, including the sender input
+            if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                openSearch();
+                return;
+            }
+            if (e.key === 'F3' && searchOpenRef.current) {
+                e.preventDefault();
+                stepMatch(e.shiftKey ? 1 : -1);
+                return;
+            }
             const target = e.target as HTMLElement;
             if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
             if (e.key === 'Escape') {
@@ -620,7 +781,7 @@ export function Terminal({
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
-    }, [copySelected]);
+    }, [copySelected, openSearch, stepMatch]);
 
     // Memoize EOL bytes — computed once when eolSequence changes, not per-line
     const eolBytes = useMemo(() => {
@@ -637,14 +798,14 @@ export function Terminal({
     // the old length-based dependency stopped firing and auto-scroll died.
     const totalAppended = firstItemIndex + lines.length;
     useEffect(() => {
-        if (autoScroll && virtuosoRef.current && lines.length > 0) {
+        if (autoScroll && virtuosoRef.current && viewLines.length > 0) {
             virtuosoRef.current.scrollToIndex({
-                index: firstItemIndex + lines.length - 1,
+                index: viewFirst + viewLines.length - 1,
                 align: 'end',
                 behavior: 'auto'
             });
         }
-    }, [totalAppended, autoScroll]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [totalAppended, autoScroll, filterActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
@@ -664,13 +825,33 @@ export function Terminal({
             className="flex-grow font-mono text-sm overflow-hidden h-full relative bg-white dark:bg-[#1e1e1e] text-gray-950 dark:text-gray-100 transition-colors duration-200"
             onContextMenu={handleContextMenu}
         >
+            {searchOpen && (
+                <TerminalSearchBar
+                    inputRef={searchInputRef}
+                    query={query}
+                    onQueryChange={setQuery}
+                    caseSensitive={caseSensitive}
+                    onToggleCase={() => setCaseSensitive(c => !c)}
+                    filterOnly={filterOnly}
+                    onToggleFilter={() => setFilterOnly(f => !f)}
+                    current={activePos}
+                    total={matchedLines.length}
+                    onOlder={() => stepMatch(-1)}
+                    onNewer={() => stepMatch(1)}
+                    onClose={closeSearch}
+                />
+            )}
+
             <Virtuoso
+                // Remount when switching between all lines and the filtered
+                // subset — they don't share an index space (firstItemIndex)
+                key={filterActive ? 'filtered' : 'all'}
                 ref={virtuosoRef}
-                data={lines}
-                totalCount={lines.length}
-                firstItemIndex={firstItemIndex}
+                data={viewLines}
+                totalCount={viewLines.length}
+                firstItemIndex={viewFirst}
                 followOutput={autoScroll ? "auto" : false}
-                initialTopMostItemIndex={Math.max(0, firstItemIndex + lines.length - 1)}
+                initialTopMostItemIndex={Math.max(0, viewFirst + viewLines.length - 1)}
                 // Keep far more rows mounted above/below the viewport than Virtuoso's tiny
                 // default overscan. Native browser text selection dies the instant its DOM
                 // node unmounts, so this buys a much larger scroll range before an in-progress
@@ -700,6 +881,9 @@ export function Terminal({
                         }}
                         onClear={onClear}
                         onSendCommand={(cmd) => onSendCommand?.(cmd)}
+                        onFind={openSearch}
+                        searchRe={searchRe}
+                        isActiveMatch={searchRe !== null && line.id === activeMatchId}
                     />
                 )}
                 style={{ height: '100%' }}
@@ -747,6 +931,7 @@ export function Terminal({
                         ...(confirmedSelectionRef.current ? [
                             { label: 'Copy Text Selection', icon: Copy, onClick: handleCopy },
                         ] as const : []),
+                        { label: 'Find… (Ctrl+F)', icon: Search, onClick: openSearch },
                         { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },
                         {
                             label: autoScroll ? 'Disable Auto-Scroll' : 'Enable Auto-Scroll',

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, ReactNode } from 'react';
-import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText, Pin, Globe } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import { Command, Sun, Moon, Settings as SettingsIcon, Trash2, RefreshCw, FileText, Pin, Globe, FolderOpen } from 'lucide-react';
 import { Dropdown } from './Dropdown';
 import { useSettings } from '../contexts/SettingsContext';
 import { useModemLines } from '../hooks/useModemLines';
@@ -117,7 +118,7 @@ export function StatusBar({
         theme, setTheme, viewMode, setViewMode,
         autoScroll, setAutoScroll, alwaysOnTop, setAlwaysOnTop, showMacros, setShowMacros,
         selectedPort, dataBits, stopBits, parity, flowControl,
-        reconnectTimeoutSec, isLogging, setIsLogging,
+        reconnectTimeoutSec, isLogging, setIsLogging, logPath,
     } = useSettings();
 
     const { modemLines, rts, dtr, setRts, setDtr } = useModemLines(isConnected && !isReconnecting && !remoteLabel);
@@ -315,6 +316,15 @@ export function StatusBar({
                 title="Settings"
             >
                 <SettingsIcon size={14} />
+            </button>
+
+            <button
+                onClick={() => invoke('open_log_folder', { path: logPath }).catch(e => console.error('Failed to open log folder:', e))}
+                disabled={!logPath}
+                className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 text-gray-500 dark:text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-all active:scale-90 disabled:opacity-40"
+                title="Open log folder"
+            >
+                <FolderOpen size={14} />
             </button>
 
             <button

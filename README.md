@@ -27,12 +27,13 @@
 - 🎨 **ANSI Color Support**: Renders standard ANSI SGR escape codes (foreground/background colors, bold, underline) directly in the terminal view.
 - 📟 **Smart View Modes**: Toggle between **Text**, **Char**, **Hex**, **Bin**, **Dec**, and **Oct** views on the fly.
 - 📋 **Line Selection & Copy**: Click the timestamp gutter to select lines (Shift/Ctrl+click for range/multi-select) and copy with `Ctrl+C` or a floating "Copy Selected" button — works even for lines scrolled off-screen in the virtualized view.
+- 🔍 **Output Search**: `Ctrl+F` searches the terminal in any view mode (text, or byte sequences like `0D 0A` in hex) with live highlighting, match count, older/newer navigation, match-case and a grep-style "only matching lines" filter.
 - 🔥 **Advanced Macro System**: Save, categorize, and execute commands from a resizable, color-filtered sidebar. Drag to reorder macros, with per-macro line endings.
 - 🕒 **Command History**: Persistent, deduplicated history buffer with dropdown access and arrow-key navigation.
 - 💾 **Portability**: Seamlessly Import/Export macro sets via JSON for easy configuration sharing.
 - 🎯 **Direct Saving**: One-click "Save to Macro" functionality directly from your command history.
 - 📋 **Flexible Line Breaking**: Break lines based on **Timeout**, **Byte Count**, **Chunks**, or specific **Sequences** — "before" and "after" sequence triggers are independent and combinable, each with its own enable/disable toggle.
-- 📂 **Session Logging**: Robust logging system with automated directory management — a fresh timestamped file is created each time logging starts.
+- 📂 **Session Logging**: Robust logging system with automated directory management — a fresh timestamped file is created each time logging starts, and the log folder opens in Finder/Explorer with one click.
 - ⚡ **ESC Sequences**: Full support for escaped characters and C-style strings in TX data (`\h(4F)`, `0x4F`, `\r`, `\n` and more), including a custom line-ending option in the sender.
 - 📏 **Configurable Display Limit**: Set the terminal's rolling line buffer from 1,000 to 100,000 lines; auto-scroll keeps following once the cap is reached.
 - ⌨️ **Keyboard Shortcuts**: Press `?` for a full shortcut reference. Shift+Enter / Shift+Click to send without line ending.

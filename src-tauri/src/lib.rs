@@ -10,9 +10,56 @@ fn set_always_on_top(on: bool, window: tauri::Window) -> Result<(), String> {
     window.set_always_on_top(on).map_err(|e| e.to_string())
 }
 
+/// Show the log in Finder/Explorer: selects the file if it exists, otherwise
+/// opens (creating if needed) the folder it will be written to.
+#[tauri::command]
+fn open_log_folder(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let file = std::path::Path::new(&path);
+    if file.is_file() {
+        return app.opener().reveal_item_in_dir(file).map_err(|e| e.to_string());
+    }
+    let dir = file
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| "Log path has no folder".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// macOS: Cmd+F/G otherwise reach WKWebView's own find panel before the page
+/// can intercept them; menu key equivalents win, so route them to the app's
+/// search bar instead. (Windows/Linux have no default menu bar; the frontend
+/// handles Ctrl+F there.)
+#[cfg(target_os = "macos")]
+fn mac_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+    let menu = Menu::default(app)?;
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(sub) = item {
+            if sub.text()? == "Edit" {
+                sub.append(&PredefinedMenuItem::separator(app)?)?;
+                sub.append(&MenuItem::with_id(app, "find", "Find…", true, Some("CmdOrCtrl+F"))?)?;
+                sub.append(&MenuItem::with_id(app, "find-next", "Find Next", true, Some("CmdOrCtrl+G"))?)?;
+                sub.append(&MenuItem::with_id(app, "find-prev", "Find Previous", true, Some("CmdOrCtrl+Shift+G"))?)?;
+            }
+        }
+    }
+    Ok(menu)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    Builder::default()
+    let builder = Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(mac_menu).on_menu_event(|app, event| {
+        use tauri::Emitter;
+        let id = event.id().as_ref();
+        if matches!(id, "find" | "find-next" | "find-prev") {
+            let _ = app.emit("menu-find", id.to_string());
+        }
+    });
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(serial_manager::SerialState {
@@ -75,6 +122,7 @@ pub fn run() {
             remote_bridge::connect_remote,
             remote_bridge::discover_shares,
             set_always_on_top,
+            open_log_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
