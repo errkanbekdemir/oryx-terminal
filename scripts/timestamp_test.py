@@ -177,10 +177,42 @@ async def run_sim(args) -> int:
     return 0 if ok else 1
 
 
+def wire_groups(chunks: list[tuple[float, float, bytes]]) -> dict[int, list[tuple[int, float]]]:
+    """Date each looped-back line by its first byte from the share's M_TIME
+    frames — the same arithmetic ORYX's UI does (arrivalOf in App.tsx)."""
+    marks, stream, total = [], b"", 0
+    for ts, byte_ms, data in chunks:
+        total += len(data)
+        stream += data
+        marks.append((total, ts, byte_ms))
+    # Earliest bound over this and all later reads (see arrivalOf in App.tsx)
+    bound, low = [0.0] * len(marks), float("inf")
+    for j in range(len(marks) - 1, -1, -1):
+        end, ts, byte_ms = marks[j]
+        low = min(low, ts - (end - 1) * byte_ms)
+        bound[j] = low
+    groups: dict[int, list[tuple[int, float]]] = {}
+    pos = mark = 0
+    last = 0.0
+    for ln in stream.split(b"\r\n")[:-1]:
+        while mark < len(marks) and marks[mark][0] <= pos:
+            mark += 1
+        if mark < len(marks):
+            _, ts, byte_ms = marks[mark]
+            last = max(last, min(ts, bound[mark] + pos * byte_ms) if byte_ms > 0 else ts)
+            m = re.match(rb"TD (\d+) (\d+) ", ln)
+            if m:
+                groups.setdefault(int(m[1]), []).append((int(m[2]), last))
+        pos += len(ln) + 2
+    return groups
+
+
 async def run_device(args) -> int:
     address = normalize_address(args.address)
     print(f"Connecting to ws://{address} ...")
     sent_at: list[float] = []
+    chunks: list[tuple[float, float, bytes]] = []
+    untimed = 0
     async with connect(f"ws://{address}", max_size=None, ping_interval=None) as ws:
         ch, info = await handshake(ws, normalize_token(args.token))
         print(f"Connected: {info['port_name']} @ {info['baud']} baud on {info['host']}")
@@ -191,30 +223,59 @@ async def run_device(args) -> int:
                 await ws.send(ch.seal(kind, payload))
 
         async def drain():
+            nonlocal untimed
+            pending = None
             while True:
-                kind, _ = ch.open(await ws.recv())
+                kind, data = ch.open(await ws.recv())
                 if kind == M_PING:
                     await send(M_PONG)
+                elif kind == M_TIME and len(data) == 16:
+                    pending = struct.unpack("<dd", data)
+                elif kind == M_DATA:
+                    if pending:
+                        chunks.append((pending[0], pending[1], data))
+                    else:
+                        untimed += 1
+                    pending = None
 
         drainer = asyncio.create_task(drain())
         started = time.time()
         byte_ms = 10_000 / info["baud"]  # 8N1
-        burst_s = DEV_LINES * DEV_LINE * byte_ms / 1000
+        # Long enough lines that one takes >= 4 ms on the wire: timestamps
+        # have 1 ms resolution, so shorter lines could "pass" while sharing one.
+        size = min(max(DEV_LINE, int(4 / byte_ms) + 1), 600)
+        line_ms = size * byte_ms
+        burst_s = DEV_LINES * line_ms / 1000
         try:
             for b in range(1, DEV_BURSTS + 1):
                 sent_at.append(time.time() * 1000)
-                await send(M_DATA, b"".join(line("TD", b, n, DEV_LINE) for n in range(1, DEV_LINES + 1)))
+                await send(M_DATA, b"".join(line("TD", b, n, size) for n in range(1, DEV_LINES + 1)))
                 await asyncio.sleep(burst_s + DEV_PAUSE_S)
         finally:
             drainer.cancel()
-        print(f"Sent {DEV_BURSTS} bursts of {DEV_LINES} lines ({DEV_LINE} bytes each, {DEV_LINE * byte_ms:.2f} ms on the wire per line).")
+        print(f"Sent {DEV_BURSTS} bursts of {DEV_LINES} lines ({size} bytes each, {line_ms:.2f} ms on the wire per line).")
+        gaps = [b - a for a, b in zip(sent_at, sent_at[1:])]
+        tol = max(1.0, 0.2 * line_ms)
+
+        print("\n1) Read times sent by the sharing ORYX (its serial reader, before any UI):")
+        if not chunks:
+            print("  FAIL  no read times received — the sharing ORYX is an older build without this\n"
+                  "        feature. Install the latest build on that machine and run again.")
+            wire_ok = False
+        else:
+            sizes = sorted(len(d) for _, _, d in chunks)
+            print(f"  ({len(chunks)} reads, {sizes[0]}-{sizes[-1]} bytes each, {chunks[0][1]:.3f} ms/byte"
+                  + (f", {untimed} without a time" if untimed else "") + ")")
+            wire_ok = check(wire_groups(chunks), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 60)
+
+        print("\n2) Timestamps in the sharing ORYX's log (what its screen shows):")
         path = await get_log(args.log, started)
     if not path:
-        return 1
-    print(f"\nChecking {path}")
-    line_ms = DEV_LINE * byte_ms
-    gaps = [b - a for a, b in zip(sent_at, sent_at[1:])]
-    ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, max(1.0, 0.2 * line_ms), gaps, 60)
+        print("  (skipped — no log)")
+        return 0 if wire_ok else 1
+    print(f"  {path}")
+    log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 60)
+    ok = wire_ok and log_ok
     print("\nPASS — lines are dated by when they arrived at the port" if ok else "\nFAIL")
     return 0 if ok else 1
 

@@ -271,6 +271,7 @@ function App() {
   const rxTotalRef = useRef(0);
   const rxConsumedRef = useRef(0);
   const rxMarksRef = useRef<{ end: number; ts: number; byteMs: number }[]>([]);
+  const lastRxStampRef = useRef(0);
   const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[], at?: number): LogEntry => {
     const ansiStart = ansiStateRef.current;
     ansiStateRef.current = parseAnsi(text, ansiStart).state;
@@ -315,18 +316,28 @@ function App() {
       const data = Uint8Array.from(snapshot);
       const base = rxConsumedRef.current; // stream offset of data[0]
 
-      // When the byte at `index` of this snapshot arrived: its chunk was
-      // read at mark.ts, and it left the wire byteMs earlier per byte that
-      // follows it in the chunk — but not before the previous chunk was read.
+      // When the byte at `index` of this snapshot was on the wire. A read at
+      // mark.ts proves its bytes had arrived by then, each one byteMs before
+      // the next — and so does every later read for the bytes ahead of it.
+      // USB adapters often hold a burst back and deliver it in one go; taking
+      // the earliest such bound dates those lines by their place in the
+      // burst instead of by the single moment it was handed over.
       const marks = rxMarksRef.current;
+      const bound: number[] = new Array(marks.length); // ts of the byte at stream offset 0, per mark
+      for (let j = marks.length - 1, min = Infinity; j >= 0; j--) {
+        min = Math.min(min, marks[j].ts - (marks[j].end - 1) * marks[j].byteMs);
+        bound[j] = min;
+      }
       let markIdx = 0;
       const arrivalOf = (index: number): number | undefined => {
         const abs = base + index;
         while (markIdx < marks.length && marks[markIdx].end <= abs) markIdx++;
         const m = marks[markIdx];
         if (!m) return undefined;
-        const t = m.ts - (m.end - 1 - abs) * m.byteMs;
-        return markIdx > 0 ? Math.max(t, marks[markIdx - 1].ts) : t;
+        const t = m.byteMs > 0 ? Math.min(m.ts, bound[markIdx] + abs * m.byteMs) : m.ts;
+        // Never earlier than a line already shown
+        lastRxStampRef.current = Math.max(lastRxStampRef.current, t);
+        return lastRxStampRef.current;
       };
       lastFlushTime.current = Date.now();
 
