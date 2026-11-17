@@ -27,7 +27,7 @@
 - 🎨 **ANSI Color Support**: Renders standard ANSI SGR escape codes (foreground/background colors, bold, underline) directly in the terminal view.
 - 📟 **Smart View Modes**: Toggle between **Text**, **Char**, **Hex**, **Bin**, **Dec**, and **Oct** views on the fly.
 - 📋 **Line Selection & Copy**: Click the timestamp gutter to select lines (Shift/Ctrl+click for range/multi-select) and copy with `Ctrl+C` or a floating "Copy Selected" button — works even for lines scrolled off-screen in the virtualized view.
-- 🔍 **Output Search**: `Ctrl+F` searches the terminal in any view mode (text, or byte sequences like `0D 0A` in hex) with live highlighting, match count, older/newer navigation, match-case and a grep-style "only matching lines" filter.
+- 🔍 **Output Search**: `Ctrl+F` searches the terminal in any view mode (text, or byte sequences like `0D 0A` in hex) with live highlighting, match count, older/newer navigation, match-case, regex and a grep-style "only matching lines" filter. `Ctrl+Shift+F` lists every result in a panel with line/match counts, an RX/TX filter, click-to-jump, copy and save-to-file.
 - 🔥 **Advanced Macro System**: Save, categorize, and execute commands from a resizable, color-filtered sidebar. Drag to reorder macros, with per-macro line endings.
 - 🕒 **Command History**: Persistent, deduplicated history buffer with dropdown access and arrow-key navigation.
 - 💾 **Portability**: Seamlessly Import/Export macro sets via JSON for easy configuration sharing.

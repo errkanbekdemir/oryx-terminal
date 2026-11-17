@@ -14,6 +14,7 @@ const SHORTCUTS: { keys: string[]; description: string }[] = [
     { keys: ['Esc'], description: 'Exit history browsing' },
     { keys: ['Ctrl', 'L'], description: 'Clear terminal' },
     { keys: ['Ctrl', 'F'], description: 'Search terminal output' },
+    { keys: ['Ctrl', 'Shift', 'F'], description: 'List all search results (count, RX/TX filter, copy, save)' },
     { keys: ['Enter', 'F3'], description: 'Search: older match (Shift for newer; ⌘G / ⇧⌘G on macOS)' },
     { keys: ['Click'], description: 'Select line (click the timestamp gutter)' },
     { keys: ['Drag'], description: 'Select text across rows (drag in the timestamp column for whole lines)' },

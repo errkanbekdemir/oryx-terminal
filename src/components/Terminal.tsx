@@ -5,7 +5,9 @@ import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock, Search } 
 import { parseInput } from '../utils/parser';
 import { parseAnsi, AnsiState, DEFAULT_ANSI_STATE, isDefaultAnsiState } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
-import { TerminalSearchBar, makeSearchRegex, findRanges, highlightText, layerRanges, MATCH_CLASS, ACTIVE_MATCH_CLASS } from './TerminalSearch';
+import { invoke } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
+import { TerminalSearchBar, SearchResultsPanel, SearchDirection, compileSearch, findRanges, highlightText, layerRanges, MATCH_CLASS, ACTIVE_MATCH_CLASS } from './TerminalSearch';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 
 export interface LogEntry {
@@ -554,6 +556,9 @@ export function Terminal({
     const [query, setQuery] = useState('');
     const [debouncedQuery, setDebouncedQuery] = useState('');
     const [caseSensitive, setCaseSensitive] = useState(false);
+    const [useRegex, setUseRegex] = useState(false);
+    const [direction, setDirection] = useState<SearchDirection>('all');
+    const [resultsOpen, setResultsOpen] = useState(false);
     const [filterOnly, setFilterOnly] = useState(false);
     const [activeMatchId, setActiveMatchId] = useState<string | null>(null);
     const [jumpTick, setJumpTick] = useState(0);
@@ -564,29 +569,30 @@ export function Terminal({
         return () => clearTimeout(t);
     }, [query]);
 
-    const searchRe = useMemo(
-        () => (searchOpen ? makeSearchRegex(debouncedQuery, caseSensitive) : null),
-        [searchOpen, debouncedQuery, caseSensitive],
+    const search = useMemo(
+        () => (searchOpen ? compileSearch(debouncedQuery, caseSensitive, useRegex) : { re: null, error: null }),
+        [searchOpen, debouncedQuery, caseSensitive, useRegex],
     );
+    const searchRe = search.re;
 
-    // Per-entry match cache: entries are immutable (an open line that grows is
-    // replaced by a new object), so only newly arrived lines get tested.
-    const matchCache = useMemo(() => new WeakMap<LogEntry, boolean>(), [searchRe, viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
-    const matchedLines = useMemo(() => {
-        if (!searchRe) return [];
-        return lines.filter(l => {
-            let hit = matchCache.get(l);
-            if (hit === undefined) {
-                const text = viewMode !== 'text' && l.originalData && l.originalData.length > 0
-                    ? formatData(l.originalData, viewMode)
-                    : l.text.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
-                searchRe.lastIndex = 0;
-                hit = searchRe.test(text);
-                matchCache.set(l, hit);
+    // Per-entry match-count cache: entries are immutable (an open line that
+    // grows is replaced by a new object), so only newly arrived lines get scanned.
+    const matchCache = useMemo(() => new WeakMap<LogEntry, number>(), [searchRe, viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
+    const { matchedLines, totalMatches } = useMemo(() => {
+        let totalMatches = 0;
+        if (!searchRe) return { matchedLines: [] as LogEntry[], totalMatches };
+        const matchedLines = lines.filter(l => {
+            if (direction !== 'all' && l.type !== direction) return false;
+            let n = matchCache.get(l);
+            if (n === undefined) {
+                n = findRanges(displayText(l, viewMode), searchRe).length;
+                matchCache.set(l, n);
             }
-            return hit;
+            totalMatches += n;
+            return n > 0;
         });
-    }, [lines, searchRe, matchCache, viewMode]);
+        return { matchedLines, totalMatches };
+    }, [lines, searchRe, matchCache, viewMode, direction]);
 
     const filterActive = filterOnly && searchRe !== null;
     const viewLines = filterActive ? matchedLines : lines;
@@ -645,7 +651,7 @@ export function Terminal({
         const matches = matchedLinesRef.current;
         if (searchRe && matches.length > 0) jumpTo(matches[matches.length - 1].id);
         else setActiveMatchId(null);
-    }, [searchRe]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [searchRe, direction]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
         const id = activeMatchIdRef.current;
@@ -667,17 +673,39 @@ export function Terminal({
         requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); });
     }, []);
 
+    const openResults = useCallback(() => {
+        setResultsOpen(true);
+        openSearch();
+    }, [openSearch]);
+
     const closeSearch = useCallback(() => {
         setSearchOpen(false);
+        setResultsOpen(false);
         setActiveMatchId(null);
     }, []);
+
+    const resultsText = useCallback(() => matchedLinesRef.current
+        .map(l => `${l.timestamp} ${l.type === 'tx' ? 'TX' : l.type === 'rx' ? 'RX' : '--'}  ${displayText(l, viewModeRef.current).replace(/[\r\n]+$/, '')}`)
+        .join('\n'), []);
+
+    const saveResults = async () => {
+        try {
+            const path = await save({ defaultPath: 'oryx_search_results.txt', filters: [{ name: 'Text', extensions: ['txt'] }] });
+            if (!path) return;
+            const header = `# ORYX search: ${query} — ${matchedLines.length} lines, ${totalMatches} matches\n`;
+            await invoke('write_to_file', { path, data: Array.from(new TextEncoder().encode(header + resultsText() + '\n')) });
+        } catch (e) {
+            console.error('Failed to save search results:', e);
+        }
+    };
 
     const searchOpenRef = useRef(searchOpen);
     searchOpenRef.current = searchOpen;
 
     // macOS menu (⌘F / ⌘G / ⇧⌘G) — see mac_menu in src-tauri/src/lib.rs
     useTauriEvent<string>('menu-find', (action) => {
-        if (action === 'find' || !searchOpenRef.current) openSearch();
+        if (action === 'find-all') openResults();
+        else if (action === 'find' || !searchOpenRef.current) openSearch();
         else stepMatch(action === 'find-next' ? -1 : 1);
     });
 
@@ -949,9 +977,9 @@ export function Terminal({
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
             // Search keys work from anywhere, including the sender input
-            if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+            if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'f') {
                 e.preventDefault();
-                openSearch();
+                if (e.shiftKey) openResults(); else openSearch();
                 return;
             }
             if (e.key === 'F3' && searchOpenRef.current) {
@@ -988,7 +1016,7 @@ export function Terminal({
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
-    }, [copySelected, openSearch, stepMatch, textSelectionString]);
+    }, [copySelected, openSearch, openResults, stepMatch, textSelectionString]);
 
     // Memoize EOL bytes — computed once when eolSequence changes, not per-line
     const eolBytes = useMemo(() => {
@@ -1028,10 +1056,11 @@ export function Terminal({
     };
 
     return (
+        <div className="flex-grow flex flex-col h-full min-h-0 overflow-hidden">
         <div
             ref={containerRef}
             className={clsx(
-                "flex-grow font-mono text-sm overflow-hidden h-full relative bg-white dark:bg-[#1e1e1e] text-gray-950 dark:text-gray-100 transition-colors duration-200",
+                "flex-grow min-h-0 font-mono text-sm overflow-hidden relative bg-white dark:bg-[#1e1e1e] text-gray-950 dark:text-gray-100 transition-colors duration-200",
                 dragSelecting && "select-none",
             )}
             onContextMenu={handleContextMenu}
@@ -1043,8 +1072,13 @@ export function Terminal({
                     onQueryChange={setQuery}
                     caseSensitive={caseSensitive}
                     onToggleCase={() => setCaseSensitive(c => !c)}
+                    regex={useRegex}
+                    onToggleRegex={() => setUseRegex(r => !r)}
+                    error={search.error}
                     filterOnly={filterOnly}
                     onToggleFilter={() => setFilterOnly(f => !f)}
+                    resultsOpen={resultsOpen}
+                    onToggleResults={() => setResultsOpen(o => !o)}
                     current={activePos}
                     total={matchedLines.length}
                     onOlder={() => stepMatch(-1)}
@@ -1097,7 +1131,7 @@ export function Terminal({
                         onClear={onClear}
                         onSendCommand={(cmd) => onSendCommand?.(cmd)}
                         onFind={openSearch}
-                        searchRe={searchRe}
+                        searchRe={direction === 'all' || line.type === direction ? searchRe : null}
                         isActiveMatch={searchRe !== null && line.id === activeMatchId}
                         selStart={inSel ? (i === selBounds.startIdx ? selBounds.startOff : 0) : -1}
                         selEnd={inSel ? (i === selBounds.endIdx ? selBounds.endOff : Number.MAX_SAFE_INTEGER) : -1}
@@ -1174,6 +1208,22 @@ export function Terminal({
                     ]}
                 />
             )}
+        </div>
+        {resultsOpen && (
+            <SearchResultsPanel
+                lines={matchedLines}
+                matchCount={totalMatches}
+                searchRe={searchRe}
+                getText={(l) => displayText(l, viewMode)}
+                activeId={activeMatchId}
+                onJump={jumpTo}
+                direction={direction}
+                onDirectionChange={setDirection}
+                onCopy={() => navigator.clipboard.writeText(resultsText())}
+                onSave={saveResults}
+                onClose={() => setResultsOpen(false)}
+            />
+        )}
         </div>
     );
 }

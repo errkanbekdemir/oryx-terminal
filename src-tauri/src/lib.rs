@@ -40,6 +40,7 @@ fn mac_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri
             if sub.text()? == "Edit" {
                 sub.append(&PredefinedMenuItem::separator(app)?)?;
                 sub.append(&MenuItem::with_id(app, "find", "Find…", true, Some("CmdOrCtrl+F"))?)?;
+                sub.append(&MenuItem::with_id(app, "find-all", "Find All Results…", true, Some("CmdOrCtrl+Shift+F"))?)?;
                 sub.append(&MenuItem::with_id(app, "find-next", "Find Next", true, Some("CmdOrCtrl+G"))?)?;
                 sub.append(&MenuItem::with_id(app, "find-prev", "Find Previous", true, Some("CmdOrCtrl+Shift+G"))?)?;
             }
@@ -55,7 +56,7 @@ pub fn run() {
     let builder = builder.menu(mac_menu).on_menu_event(|app, event| {
         use tauri::Emitter;
         let id = event.id().as_ref();
-        if matches!(id, "find" | "find-next" | "find-prev") {
+        if matches!(id, "find" | "find-all" | "find-next" | "find-prev") {
             let _ = app.emit("menu-find", id.to_string());
         }
     });
