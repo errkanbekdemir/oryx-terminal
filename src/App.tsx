@@ -16,6 +16,10 @@ import './App.css';
 
 interface SerialPayload {
   data: number[];
+  /** ms since the epoch when the chunk's last byte was read from the port (Rust) */
+  ts?: number;
+  /** ms per byte on the wire, to date the chunk's earlier bytes */
+  byte_ms?: number;
 }
 
 interface RemoteConnectResult {
@@ -28,8 +32,8 @@ interface RemoteConnectResult {
 const generateId = () =>
   Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
 
-const getTimestamp = () => {
-  const now = new Date();
+const getTimestamp = (at?: number) => {
+  const now = at === undefined ? new Date() : new Date(at);
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0')}`;
 };
 
@@ -262,10 +266,15 @@ function App() {
   }, [isResizing, setMacroWidth]);
 
   const pendingLinesRef = useRef<LogEntry[]>([]);
-  const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]): LogEntry => {
+  // RX arrival times: one mark per serial-data chunk, addressed by offset in
+  // the RX byte stream. bufferRef[0] is always at stream offset rxConsumedRef.
+  const rxTotalRef = useRef(0);
+  const rxConsumedRef = useRef(0);
+  const rxMarksRef = useRef<{ end: number; ts: number; byteMs: number }[]>([]);
+  const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[], at?: number): LogEntry => {
     const ansiStart = ansiStateRef.current;
     ansiStateRef.current = parseAnsi(text, ansiStart).state;
-    const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData, ansiStart };
+    const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(at), type, text, originalData, ansiStart };
     // One state update per burst instead of one array copy per line —
     // with a large display limit, per-line copies made fast streams crawl.
     pendingLinesRef.current.push(entry);
@@ -304,6 +313,21 @@ function App() {
       // land in the now-empty bufferRef and are preserved — not overwritten.
       const snapshot = bufferRef.current.splice(0);
       const data = Uint8Array.from(snapshot);
+      const base = rxConsumedRef.current; // stream offset of data[0]
+
+      // When the byte at `index` of this snapshot arrived: its chunk was
+      // read at mark.ts, and it left the wire byteMs earlier per byte that
+      // follows it in the chunk — but not before the previous chunk was read.
+      const marks = rxMarksRef.current;
+      let markIdx = 0;
+      const arrivalOf = (index: number): number | undefined => {
+        const abs = base + index;
+        while (markIdx < marks.length && marks[markIdx].end <= abs) markIdx++;
+        const m = marks[markIdx];
+        if (!m) return undefined;
+        const t = m.ts - (m.end - 1 - abs) * m.byteMs;
+        return markIdx > 0 ? Math.max(t, marks[markIdx - 1].ts) : t;
+      };
       lastFlushTime.current = Date.now();
 
       const breakPoints: number[] = [];
@@ -388,7 +412,7 @@ function App() {
       // Show `bytes` as RX. Updates the open line in place if there is one;
       // `keepOpen` leaves it open for more bytes, otherwise it's finished
       // and written to the log file (stamped with the time the line began).
-      const showRx = (bytes: number[], keepOpen: boolean) => {
+      const showRx = (bytes: number[], keepOpen: boolean, start: number) => {
         const text = new TextDecoder().decode(Uint8Array.from(bytes));
         const open = openRxRef.current;
         if (open) {
@@ -410,7 +434,7 @@ function App() {
           openRxRef.current = keepOpen ? { ...open, shown: bytes.length } : null;
           if (!keepOpen && isLoggingRef.current) logLines.push(formatLogLine('rx', bytes, currentViewMode, open.timestamp));
         } else {
-          const entry = addLog(text, 'rx', bytes);
+          const entry = addLog(text, 'rx', bytes, arrivalOf(start));
           if (keepOpen) {
             openRxRef.current = { id: entry.id, ansiStart: entry.ansiStart ?? DEFAULT_ANSI_STATE, timestamp: entry.timestamp, shown: bytes.length };
           } else if (isLoggingRef.current) {
@@ -422,23 +446,30 @@ function App() {
       let lastIndex = 0;
       for (const breakPoint of uniqueBreakPoints) {
         if (breakPoint > lastIndex && breakPoint <= data.length) {
-          showRx(Array.from(data.slice(lastIndex, breakPoint)), false);
+          showRx(Array.from(data.slice(lastIndex, breakPoint)), false, lastIndex);
           lastIndex = breakPoint;
         }
       }
       const remaining = Array.from(data.slice(lastIndex));
+      let consumed = lastIndex;
       if (remaining.length > 0) {
         if (mode === 'complete' || remaining.length >= MAX_OPEN_LINE) {
-          showRx(remaining, false);
+          showRx(remaining, false, lastIndex);
+          consumed = data.length;
         } else {
           if (mode === 'partial' && remaining.length !== openRxRef.current?.shown) {
-            showRx(remaining, true);
+            showRx(remaining, true, lastIndex);
           }
           // Not consumed: stays ahead of any bytes that arrived meanwhile,
           // to be re-evaluated (and the open line updated) on the next flush
           bufferRef.current = [...remaining, ...bufferRef.current];
         }
       }
+      rxConsumedRef.current = base + consumed;
+      // Keep the mark covering the first unconsumed byte and the one before it (the clamp)
+      let keepFrom = 0;
+      while (keepFrom < marks.length && marks[keepFrom].end <= rxConsumedRef.current) keepFrom++;
+      if (keepFrom > 1) marks.splice(0, keepFrom - 1);
 
       // Batch write formatted log lines
       if (logLines.length > 0 && logPathRef.current) {
@@ -484,8 +515,12 @@ function App() {
     const buf = bufferRef.current;
     const data = payload.data;
     for (let i = 0; i < data.length; i++) buf.push(data[i]);
+    rxTotalRef.current += data.length;
+    rxMarksRef.current.push({ end: rxTotalRef.current, ts: payload.ts ?? Date.now(), byteMs: payload.byte_ms ?? 0 });
     if (buf.length > MAX_BUFFER) {
-      buf.splice(0, buf.length - MAX_BUFFER);
+      const dropped = buf.length - MAX_BUFFER;
+      buf.splice(0, dropped);
+      rxConsumedRef.current += dropped;
     }
     lastReceiveTime.current = Date.now();
   });

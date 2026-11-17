@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
-use crate::serial_manager::{send_data_inner, Payload, SerialState};
+use crate::serial_manager::{now_ms, send_data_inner, Payload, SerialState};
 
 pub const SERVICE_TYPE: &str = "_oryx._tcp.local.";
 pub const DEFAULT_SHARE_PORT: u16 = 48550;
@@ -53,6 +53,9 @@ const M_PONG: u8 = 0x05;
 // Share-side local TX mirrored to the client for display. Additive: older
 // peers ignore unknown kinds, so no PROTO_VERSION bump.
 const M_TX: u8 = 0x06;
+// Sent by the share right before an M_DATA: [f64 LE read time in ms since the
+// epoch][f64 LE ms per byte] for that chunk. Additive, like M_TX.
+const M_TIME: u8 = 0x07;
 
 // 32 symbols, no 0/O/1/I ambiguity — 16 chars = 80 bits, enough that an
 // eavesdropper who captures a handshake can't brute-force it offline.
@@ -509,7 +512,7 @@ async fn serve_client(
                 writer_bytes_in.fetch_add(payload.len() as u64, Ordering::Relaxed);
                 // Same path as local TX so flow control / RS-485 keying apply
                 match send_data_inner(payload.clone(), &serial).await {
-                    Ok(()) => { writer_app.emit("remote-tx", Payload { data: payload }).ok(); }
+                    Ok(()) => { writer_app.emit("remote-tx", Payload::now(payload)).ok(); }
                     Err(e) => eprintln!("share: remote TX failed: {e}"),
                 }
             }
@@ -528,9 +531,13 @@ async fn serve_client(
                     Err(_) => break,
                 },
                 r = rx.recv() => match r {
-                    Ok(bytes) => {
-                        bytes_out.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                        if send_binary(&mut ws, ch.seal(M_DATA, &bytes)).await.is_err() { break; }
+                    Ok(chunk) => {
+                        bytes_out.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+                        let mut time = Vec::with_capacity(16);
+                        time.extend_from_slice(&chunk.ts.to_le_bytes());
+                        time.extend_from_slice(&chunk.byte_ms.to_le_bytes());
+                        if send_binary(&mut ws, ch.seal(M_TIME, &time)).await.is_err() { break; }
+                        if send_binary(&mut ws, ch.seal(M_DATA, &chunk.data)).await.is_err() { break; }
                     }
                     // Client too slow for the serial stream — drop the backlog rather than the session
                     Err(broadcast::error::RecvError::Lagged(n)) => eprintln!("share: client lagged, dropped {n} chunks"),
@@ -729,6 +736,8 @@ async fn run_session(
 ) -> SessionEnd {
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut last_seen = Instant::now();
+    let mut next_time: Option<(f64, f64)> = None;
+    let mut clock_offset = f64::INFINITY;
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
@@ -747,8 +756,24 @@ async fn run_session(
                     last_seen = Instant::now();
                     let Ok((kind, payload)) = ch.open(&b) else { return SessionEnd::Dropped };
                     match kind {
-                        M_DATA => { app.emit("serial-data", Payload { data: payload }).ok(); }
-                        M_TX => { app.emit("remote-tx", Payload { data: payload }).ok(); }
+                        M_TIME if payload.len() == 16 => {
+                            let f = |i: usize| f64::from_le_bytes(payload[i..i + 8].try_into().expect("length checked"));
+                            next_time = Some((f(0), f(8)));
+                        }
+                        M_DATA => {
+                            let p = match next_time.take() {
+                                // Show the sharer's read times on this machine's clock: the
+                                // smallest offset seen is clock skew plus the best-case network
+                                // delay, so line spacing stays the sharer's, free of jitter.
+                                Some((ts, byte_ms)) => {
+                                    clock_offset = clock_offset.min(now_ms() - ts);
+                                    Payload { data: payload, ts: ts + clock_offset, byte_ms }
+                                }
+                                None => Payload::now(payload), // older share
+                            };
+                            app.emit("serial-data", p).ok();
+                        }
+                        M_TX => { app.emit("remote-tx", Payload::now(payload)).ok(); }
                         M_STATUS => {
                             let alive = payload.first() == Some(&1);
                             connected.store(alive, Ordering::SeqCst);

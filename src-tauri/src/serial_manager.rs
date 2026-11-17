@@ -76,7 +76,7 @@ pub struct SerialState {
     pub tx_key_epoch: Arc<AtomicU64>,
     /// Copy of every RX chunk for the remote-share bridge. Survives
     /// reconnects; a send with no subscribers is a cheap no-op.
-    pub rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
+    pub rx_tap: tokio::sync::broadcast::Sender<Payload>,
     /// Copy of locally-initiated TX, mirrored to the remote client's view.
     pub tx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
     pub active_baud: Arc<AtomicU64>,
@@ -150,6 +150,25 @@ pub struct RawParams {
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct Payload {
     pub(crate) data: Vec<u8>,
+    /// Wall-clock ms since the Unix epoch at which the last byte of `data`
+    /// was read from the port — stamped here, not in the UI's flush loop.
+    pub(crate) ts: f64,
+    /// Time one byte takes on the wire, so the UI can date the earlier bytes
+    /// of the chunk (0 = unknown).
+    pub(crate) byte_ms: f64,
+}
+
+impl Payload {
+    pub(crate) fn now(data: Vec<u8>) -> Self {
+        Self { data, ts: now_ms(), byte_ms: 0.0 }
+    }
+}
+
+pub(crate) fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -258,10 +277,15 @@ fn spawn_read_thread(
     params: RawParams,
     lines: LineCtl,
     flow_mode: Arc<Mutex<FlowMode>>,
-    rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
+    rx_tap: tokio::sync::broadcast::Sender<Payload>,
 ) {
     thread::spawn(move || {
         let mut buf = vec![0u8; 1000];
+        // start bit + data bits + parity bit + stop bits
+        let frame_bits = 1 + params.data_bits as u32
+            + u32::from(!params.parity.eq_ignore_ascii_case("none"))
+            + params.stop_bits as u32;
+        let byte_ms = frame_bits as f64 * 1000.0 / params.baud_rate.max(1) as f64;
 
         loop {
             if !running.load(Ordering::SeqCst) {
@@ -270,6 +294,7 @@ fn spawn_read_thread(
 
             match read_port.read(buf.as_mut_slice()) {
                 Ok(n) if n > 0 => {
+                    let ts = now_ms();
                     // Read live so a flow-control change while connected takes
                     // effect on the next chunk instead of needing a reconnect.
                     let soft_gated = flow_mode.lock().map(|m| m.soft_gated()).unwrap_or(false);
@@ -290,10 +315,11 @@ fn spawn_read_thread(
                     };
 
                     if !chunk.is_empty() {
+                        let payload = Payload { data: chunk, ts, byte_ms };
                         if rx_tap.receiver_count() > 0 {
-                            let _ = rx_tap.send(chunk.clone());
+                            let _ = rx_tap.send(payload.clone());
                         }
-                        if app.emit("serial-data", Payload { data: chunk }).is_err() {
+                        if app.emit("serial-data", payload).is_err() {
                             break; // Window closed
                         }
                     }
@@ -344,7 +370,7 @@ fn reconnect_loop(
     app: AppHandle,
     lines: LineCtl,
     flow_mode: Arc<Mutex<FlowMode>>,
-    rx_tap: tokio::sync::broadcast::Sender<Vec<u8>>,
+    rx_tap: tokio::sync::broadcast::Sender<Payload>,
 ) {
     loop {
         // Check for abort before sleeping
