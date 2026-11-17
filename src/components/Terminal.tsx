@@ -5,7 +5,7 @@ import { Copy, Trash, MousePointer2, Binary, Scissors, Send, X, Clock, Search } 
 import { parseInput } from '../utils/parser';
 import { parseAnsi, AnsiState, DEFAULT_ANSI_STATE, isDefaultAnsiState } from '../utils/ansiParser';
 import { ContextMenu } from './ContextMenu';
-import { TerminalSearchBar, makeSearchRegex, findRanges, highlightText, MATCH_CLASS, ACTIVE_MATCH_CLASS } from './TerminalSearch';
+import { TerminalSearchBar, makeSearchRegex, findRanges, highlightText, layerRanges, MATCH_CLASS, ACTIVE_MATCH_CLASS } from './TerminalSearch';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 
 export interface LogEntry {
@@ -48,6 +48,16 @@ function formatByte(b: number, mode: string): string {
 
 const formatData = (data: number[], mode: string): string =>
     data.map(b => formatByte(b, mode)).join(' ');
+
+/** A position in a row's displayed text (see displayText) */
+interface TextPoint { id: string; offset: number }
+
+/** Exactly the characters a row shows — selection offsets index into this. */
+function displayText(line: LogEntry, viewMode: string): string {
+    return viewMode !== 'text' && line.originalData && line.originalData.length > 0
+        ? formatData(line.originalData, viewMode)
+        : line.text.replace(/\x1b\[[\d;]*m/g, ''); // same sequences parseAnsi consumes
+}
 
 // ─── Byte Inspector ──────────────────────────────────────────────────────────
 
@@ -239,6 +249,7 @@ interface TerminalRowProps {
      *  the word-under-cursor auto-selection some browsers perform when a
      *  right-click opens a context menu over unselected text. */
     confirmedSelectionRef: React.RefObject<string>;
+    selectionTsRef: React.RefObject<string>;
     onSelectLine: (id: string, mods: { ctrl: boolean; shift: boolean }) => void;
     onCopySelected: (withTimestamps: boolean) => void;
     onToggleAutoScroll: () => void;
@@ -249,6 +260,9 @@ interface TerminalRowProps {
     onFind: () => void;
     searchRe: RegExp | null;
     isActiveMatch: boolean;
+    /** Text-selection range within this row's displayed text; -1 = none */
+    selStart: number;
+    selEnd: number;
 }
 
 const TerminalRow = memo(function TerminalRow({
@@ -262,6 +276,7 @@ const TerminalRow = memo(function TerminalRow({
     isSelected,
     selectedCount,
     confirmedSelectionRef,
+    selectionTsRef,
     onSelectLine,
     onCopySelected,
     onToggleAutoScroll,
@@ -272,12 +287,15 @@ const TerminalRow = memo(function TerminalRow({
     onFind,
     searchRe,
     isActiveMatch,
+    selStart,
+    selEnd,
 }: TerminalRowProps) {
     const [selectedByteIdx, setSelectedByteIdx] = useState<number | null>(null);
     const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
     // Snapshot of the confirmed selection at the moment of right-click
     const [nativeSelection, setNativeSelection] = useState('');
+    const [nativeSelectionTs, setNativeSelectionTs] = useState('');
 
     const isNonTextMode = viewMode !== 'text' && !!line.originalData && line.originalData.length > 0;
     const isByteMode = inspectorEnabled && isNonTextMode; // interactive per-byte spans
@@ -308,6 +326,7 @@ const TerminalRow = memo(function TerminalRow({
     const searchRanges = searchRe
         ? findRanges(ansiSegments ? ansiSegments.map(s => s.text).join('') : content, searchRe)
         : [];
+    const marks = layerRanges(searchRanges, markClass, selStart, selEnd);
 
     // Compute EOL match once per row
     let hasEolMatch = false;
@@ -328,6 +347,7 @@ const TerminalRow = memo(function TerminalRow({
         e.preventDefault();
         e.stopPropagation();
         setNativeSelection(confirmedSelectionRef.current);
+        setNativeSelectionTs(selectionTsRef.current);
         setContextMenu({ x: e.clientX, y: e.clientY });
     };
 
@@ -348,6 +368,7 @@ const TerminalRow = memo(function TerminalRow({
     return (
         <>
         <div
+            data-line-id={line.id}
             onContextMenu={handleRowContextMenu}
             className={clsx("px-0 py-0.5 leading-tight break-all flex border-b border-gray-100 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 group", {
             // SIMPLE MODE (Green/Blue)
@@ -363,6 +384,7 @@ const TerminalRow = memo(function TerminalRow({
         })}>
             {/* Metadata Gutter (Timestamp + Direction) — click to select the line */}
             <div
+                data-gutter
                 onClick={(e) => onSelectLine(line.id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
                 title="Click to select · Shift+Click range · Ctrl+Click toggle"
                 className={clsx(
@@ -387,7 +409,7 @@ const TerminalRow = memo(function TerminalRow({
                 </span>
             </div>
 
-            <span className="flex-grow whitespace-pre-wrap font-medium font-mono relative px-3 py-0.5">
+            <span data-line-text className="flex-grow whitespace-pre-wrap font-medium font-mono relative px-3 py-0.5">
                 {isNonTextMode ? (
                     isByteMode ? (
                         (() => {
@@ -396,14 +418,14 @@ const TerminalRow = memo(function TerminalRow({
                                 const label = formatByte(byte, viewMode);
                                 const start = pos;
                                 pos += label.length + 1;
-                                const matched = searchRanges.some(([s, e]) => s < start + label.length && e > start);
+                                const mark = marks.find(([s, e]) => s < start + label.length && e > start)?.[2];
                                 return (
                                     <span key={bIdx}>
                                         <span
                                             onClick={(e) => { e.stopPropagation(); setSelectedByteIdx(selectedByteIdx === bIdx ? null : bIdx); setTooltipPos({ x: e.clientX, y: e.clientY }); }}
                                             className={clsx(
                                                 "rounded px-0.5 transition-colors cursor-pointer select-none",
-                                                matched && markClass,
+                                                mark,
                                                 selectedByteIdx !== null && bIdx === selectedByteIdx     && "bg-blue-500/30 text-blue-200",
                                                 selectedByteIdx !== null && bIdx === selectedByteIdx + 1 && "bg-blue-500/15",
                                                 selectedByteIdx !== null && (bIdx === selectedByteIdx + 2 || bIdx === selectedByteIdx + 3) && "bg-blue-500/10",
@@ -417,7 +439,7 @@ const TerminalRow = memo(function TerminalRow({
                             });
                         })()
                     ) : (
-                        highlightText(content, searchRanges, 0, markClass)
+                        highlightText(content, marks, 0)
                     )
                 ) : (
                     ansiSegments ? (
@@ -435,17 +457,17 @@ const TerminalRow = memo(function TerminalRow({
                                             "underline": segment.underline
                                         })}
                                     >
-                                        {highlightText(segment.text, searchRanges, segOffset, markClass)}
+                                        {highlightText(segment.text, marks, segOffset)}
                                     </span>
                                 );
                             });
                         })()
                     ) : (
-                        highlightText(content, searchRanges, 0, markClass)
+                        highlightText(content, marks, 0)
                     )
                 )}
                 {hasEolMatch && (
-                    <span className="inline-flex items-center ml-1 text-blue-500/50 dark:text-blue-400/30 select-none font-bold" title="EOL">
+                    <span data-no-text className="inline-flex items-center ml-1 text-blue-500/50 dark:text-blue-400/30 select-none font-bold" title="EOL">
                         ↵
                     </span>
                 )}
@@ -482,6 +504,7 @@ const TerminalRow = memo(function TerminalRow({
                 options={[
                     ...(nativeSelection ? [
                         { label: 'Copy Text Selection', icon: Copy, onClick: () => navigator.clipboard.writeText(nativeSelection) },
+                        ...(nativeSelectionTs ? [{ label: 'Copy Text Selection with Timestamps', icon: Clock, onClick: () => navigator.clipboard.writeText(nativeSelectionTs) }] : []),
                     ] as const : []),
                     { label: 'Copy Line', icon: Copy, onClick: copyLine },
                     { label: 'Copy with Timestamp', icon: Copy, onClick: copyLineWithTimestamp },
@@ -573,25 +596,25 @@ export function Terminal({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const anchorIdRef = useRef<string | null>(null);
 
-    const idToIndex = useMemo(() => {
-        const m = new Map<string, number>();
-        lines.forEach((l, i) => m.set(l.id, i));
-        return m;
-    }, [lines]);
-    const viewIdToIndex = useMemo(() => {
-        if (!filterActive) return idToIndex;
-        const m = new Map<string, number>();
-        viewLines.forEach((l, i) => m.set(l.id, i));
-        return m;
-    }, [filterActive, viewLines, idToIndex]);
-
     // Refs so the selection callback stays referentially stable (keeps row memo effective)
     const linesRef = useRef(lines);
     linesRef.current = lines;
     const viewLinesRef = useRef(viewLines);
     viewLinesRef.current = viewLines;
-    const viewIdToIndexRef = useRef(viewIdToIndex);
-    viewIdToIndexRef.current = viewIdToIndex;
+
+    // id → index in the displayed list, built on demand (range select, drag,
+    // search jump) — rebuilding it for every incoming line is wasted work
+    // with a large display limit.
+    const viewIndexCache = useRef<{ lines: LogEntry[]; map: Map<string, number> } | null>(null);
+    const getViewIndex = useCallback(() => {
+        const cur = viewLinesRef.current;
+        if (viewIndexCache.current?.lines !== cur) {
+            const map = new Map<string, number>();
+            cur.forEach((l, i) => map.set(l.id, i));
+            viewIndexCache.current = { lines: cur, map };
+        }
+        return viewIndexCache.current.map;
+    }, []);
     const viewModeRef = useRef(viewMode);
     viewModeRef.current = viewMode;
 
@@ -627,7 +650,7 @@ export function Terminal({
     useEffect(() => {
         const id = activeMatchIdRef.current;
         if (!id) return;
-        const idx = viewIdToIndexRef.current.get(id);
+        const idx = getViewIndex().get(id);
         if (idx !== undefined) {
             virtuosoRef.current?.scrollToIndex({ index: viewFirst + idx, align: 'center', behavior: 'auto' });
         }
@@ -663,12 +686,11 @@ export function Terminal({
     const handleSelectLine = useCallback((id: string, mods: { ctrl: boolean; shift: boolean }) => {
         setSelectedIds(prev => {
             const curLines = viewLinesRef.current;
-            const indexMap = viewIdToIndexRef.current;
             const next = new Set(prev);
             const anchor = anchorIdRef.current;
-            if (mods.shift && anchor !== null && indexMap.has(anchor) && indexMap.has(id)) {
-                const a = indexMap.get(anchor)!;
-                const b = indexMap.get(id)!;
+            const a = mods.shift && anchor !== null ? getViewIndex().get(anchor) : undefined;
+            const b = a !== undefined ? getViewIndex().get(id) : undefined;
+            if (a !== undefined && b !== undefined) {
                 const [lo, hi] = a <= b ? [a, b] : [b, a];
                 if (!mods.ctrl) next.clear();
                 for (let i = lo; i <= hi; i++) next.add(curLines[i].id);
@@ -682,20 +704,16 @@ export function Terminal({
             }
             return next;
         });
-    }, []);
+    }, [getViewIndex]);
 
     // Prune ids whose lines were trimmed or cleared so the count stays honest
     useEffect(() => {
         setSelectedIds(prev => {
             if (prev.size === 0) return prev;
-            let changed = false;
-            const next = new Set<string>();
-            for (const id of prev) {
-                if (idToIndex.has(id)) next.add(id); else changed = true;
-            }
-            return changed ? next : prev;
+            const alive = lines.filter(l => prev.has(l.id));
+            return alive.length === prev.size ? prev : new Set(alive.map(l => l.id));
         });
-    }, [idToIndex]);
+    }, [lines]);
 
     const selectedIdsRef = useRef(selectedIds);
     selectedIdsRef.current = selectedIds;
@@ -709,6 +727,8 @@ export function Terminal({
     // collapses the previous selection to '' though, so that signal still
     // comes through.
     const confirmedSelectionRef = useRef('');
+    /** The same selection with each line's timestamp prefixed */
+    const selectionTsRef = useRef('');
     const mouseButtonRef = useRef(0);
     useEffect(() => {
         const onMouseDown = (e: MouseEvent) => { mouseButtonRef.current = e.button; };
@@ -716,6 +736,9 @@ export function Terminal({
             const text = window.getSelection()?.toString() ?? '';
             if (text === '' || mouseButtonRef.current !== 2) {
                 confirmedSelectionRef.current = text;
+                const rowId = (window.getSelection()?.anchorNode?.parentElement?.closest('[data-line-id]') as HTMLElement | null)?.dataset.lineId;
+                const idx = text && rowId ? getViewIndex().get(rowId) : undefined;
+                selectionTsRef.current = idx !== undefined ? `${viewLinesRef.current[idx].timestamp} ${text}` : '';
             }
         };
         document.addEventListener('mousedown', onMouseDown, true);
@@ -727,11 +750,11 @@ export function Terminal({
     }, []);
 
     // Copy from the lines data (not the DOM) so off-screen virtualized rows are included
-    const copySelected = useCallback((withTimestamps = false) => {
+    const selectedText = useCallback((withTimestamps: boolean) => {
         const ids = selectedIdsRef.current;
-        if (ids.size === 0) return;
+        if (ids.size === 0) return '';
         const mode = viewModeRef.current;
-        const text = linesRef.current
+        return linesRef.current
             .filter(l => ids.has(l.id))
             .map(l => {
                 const body = mode !== 'text' && l.originalData && l.originalData.length > 0
@@ -740,8 +763,186 @@ export function Terminal({
                 return withTimestamps ? `${l.timestamp} ${body}` : body;
             })
             .join('\n');
-        if (text) navigator.clipboard.writeText(text);
     }, []);
+
+    const copySelected = useCallback((withTimestamps = false) => {
+        const text = selectedText(withTimestamps);
+        if (text) navigator.clipboard.writeText(text);
+    }, [selectedText]);
+
+    // ─── Drag selection ──────────────────────────────────────────────────────
+    // Native text selection lives in the DOM, and virtualized rows unmount as
+    // they scroll away — so a drag that scrolls loses its start. Once a drag
+    // leaves the row it began in, the selection is kept in data instead: by
+    // character (line id + offset into the row's displayed text) when it
+    // starts in the text, by whole lines when it starts in the gutter.
+    // Selection inside a single row stays native.
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [dragSelecting, setDragSelecting] = useState(false);
+    const [textSel, setTextSel] = useState<{ anchor: TextPoint; focus: TextPoint } | null>(null);
+    const setAutoScrollRef = useRef(setAutoScroll);
+    setAutoScrollRef.current = setAutoScroll;
+
+    const selBounds = useMemo(() => {
+        if (!textSel) return null;
+        const map = getViewIndex();
+        const a = map.get(textSel.anchor.id);
+        const f = map.get(textSel.focus.id);
+        if (a === undefined || f === undefined) return null; // an end was trimmed/filtered away
+        const forward = a < f || (a === f && textSel.anchor.offset <= textSel.focus.offset);
+        const [start, end] = forward ? [textSel.anchor, textSel.focus] : [textSel.focus, textSel.anchor];
+        return { startIdx: Math.min(a, f), startOff: start.offset, endIdx: Math.max(a, f), endOff: end.offset };
+    }, [textSel, viewLines, getViewIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+    const selBoundsRef = useRef(selBounds);
+    selBoundsRef.current = selBounds;
+
+    const textSelectionString = useCallback((withTimestamps = false) => {
+        const b = selBoundsRef.current;
+        if (!b) return '';
+        const cur = viewLinesRef.current;
+        const out: string[] = [];
+        for (let i = b.startIdx; i <= b.endIdx && i < cur.length; i++) {
+            const t = displayText(cur[i], viewModeRef.current);
+            const slice = t.slice(i === b.startIdx ? b.startOff : 0, i === b.endIdx ? b.endOff : t.length);
+            out.push((withTimestamps ? `${cur[i].timestamp} ` : '') + slice.replace(/[\r\n]+$/, ''));
+        }
+        return out.join('\n');
+    }, []);
+
+    // Feeds "Copy Text Selection" in the context menus, like a native selection would
+    useEffect(() => {
+        if (dragSelecting) return;
+        confirmedSelectionRef.current = selBounds ? textSelectionString() : '';
+        selectionTsRef.current = selBounds ? textSelectionString(true) : '';
+    }, [selBounds, dragSelecting, textSelectionString]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        let drag: {
+            kind: 'text' | 'lines'; anchor: TextPoint; base: Set<string> | null;
+            active: boolean; x: number; y: number; last: string; raf: number;
+        } | null = null;
+
+        // Row and character under a point; points outside the list clamp to its edge rows
+        const pointAt = (x: number, y: number): TextPoint | null => {
+            const r = el.getBoundingClientRect();
+            const cx = Math.min(Math.max(x, r.left + 1), r.right - 1);
+            const cy = Math.min(Math.max(y, r.top + 1), r.bottom - 1);
+            const row = document.elementFromPoint(cx, cy)?.closest('[data-line-id]') as HTMLElement | null;
+            const id = row?.dataset.lineId;
+            if (!row || !id) return null;
+            const textEl = row.querySelector('[data-line-text]');
+            if (!textEl) return { id, offset: 0 };
+            const extra = textEl.querySelector('[data-no-text]')?.textContent?.length ?? 0;
+            const len = (textEl.textContent?.length ?? 0) - extra;
+            if (y < r.top || cx < textEl.getBoundingClientRect().left) return { id, offset: 0 };
+            if (y > r.bottom) return { id, offset: len };
+            const caret = document.caretRangeFromPoint?.(cx, cy);
+            if (!caret || !textEl.contains(caret.startContainer)) return { id, offset: len };
+            const pre = document.createRange();
+            pre.selectNodeContents(textEl);
+            pre.setEnd(caret.startContainer, caret.startOffset);
+            return { id, offset: Math.min(pre.toString().length, len) };
+        };
+
+        const frame = () => {
+            const d = drag;
+            if (!d) return;
+            d.raf = requestAnimationFrame(frame);
+            const r = el.getBoundingClientRect();
+            const p = pointAt(d.x, d.y);
+            if (!d.active) {
+                const left = d.y < r.top || d.y > r.bottom;
+                if (!left && (!p || p.id === d.anchor.id)) return;
+                d.active = true;
+                setDragSelecting(true);
+                if (d.kind === 'text') setSelectedIds(prev => (prev.size > 0 ? new Set<string>() : prev));
+            }
+            const EDGE = 28;
+            if (d.y < r.top + EDGE) {
+                // Otherwise incoming data keeps pulling the view back down
+                setAutoScrollRef.current(false);
+                virtuosoRef.current?.scrollBy({ top: -Math.min(60, 8 + (r.top + EDGE - d.y) / 2) });
+            } else if (d.y > r.bottom - EDGE) {
+                virtuosoRef.current?.scrollBy({ top: Math.min(60, 8 + (d.y - (r.bottom - EDGE)) / 2) });
+            }
+            if (!p) return;
+            const key = d.kind === 'text' ? `${p.id}:${p.offset}` : p.id;
+            if (key === d.last) return;
+            d.last = key;
+            window.getSelection()?.removeAllRanges();
+            if (d.kind === 'text') {
+                setTextSel({ anchor: d.anchor, focus: p });
+                return;
+            }
+            const map = getViewIndex();
+            const cur = viewLinesRef.current;
+            const a = map.get(d.anchor.id);
+            const b = map.get(p.id);
+            if (a === undefined || b === undefined) return;
+            const [lo, hi] = a <= b ? [a, b] : [b, a];
+            const next = new Set(d.base ?? []);
+            for (let i = lo; i <= hi; i++) next.add(cur[i].id);
+            setSelectedIds(next);
+        };
+
+        const end = () => {
+            if (!drag) return;
+            cancelAnimationFrame(drag.raf);
+            if (drag.active) {
+                if (drag.kind === 'lines') anchorIdRef.current = drag.anchor.id; // Shift+Click can extend from here
+                setDragSelecting(false);
+            }
+            drag = null;
+        };
+
+        const onDown = (e: MouseEvent) => {
+            if (e.button !== 0 || e.shiftKey) return;
+            const target = e.target as HTMLElement;
+            if (target.closest('input, button')) return;
+            setTextSel(null);
+            if (!target.closest('[data-line-id]')) return;
+            const anchor = pointAt(e.clientX, e.clientY);
+            if (!anchor) return;
+            drag = {
+                kind: target.closest('[data-gutter]') ? 'lines' : 'text',
+                anchor, active: false, x: e.clientX, y: e.clientY, last: '', raf: 0,
+                base: e.ctrlKey || e.metaKey ? new Set(selectedIdsRef.current) : null,
+            };
+            drag.raf = requestAnimationFrame(frame);
+        };
+        const onMove = (e: MouseEvent) => { if (drag) { drag.x = e.clientX; drag.y = e.clientY; } };
+
+        el.addEventListener('mousedown', onDown);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', end);
+        window.addEventListener('blur', end);
+        return () => {
+            end();
+            el.removeEventListener('mousedown', onDown);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', end);
+            window.removeEventListener('blur', end);
+        };
+    }, [getViewIndex]);
+
+    // ⌘C on macOS goes through the Edit menu's native copy, which arrives
+    // here as a `copy` event rather than a keydown — serve selected lines
+    // when there is no native text selection to copy.
+    useEffect(() => {
+        const onCopy = (e: ClipboardEvent) => {
+            const target = e.target as HTMLElement | null;
+            if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+            if (window.getSelection()?.toString()) return;
+            const text = textSelectionString() || selectedText(false);
+            if (!text || !e.clipboardData) return;
+            e.clipboardData.setData('text/plain', text);
+            e.preventDefault();
+        };
+        document.addEventListener('copy', onCopy);
+        return () => document.removeEventListener('copy', onCopy);
+    }, [selectedText, textSelectionString]);
 
     // Keyboard: Ctrl+C copies selected lines (native text selection wins),
     // Ctrl+Shift+C always copies selected lines, Escape clears the selection
@@ -761,10 +962,16 @@ export function Terminal({
             const target = e.target as HTMLElement;
             if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
             if (e.key === 'Escape') {
+                setTextSel(null);
                 setSelectedIds(prev => prev.size > 0 ? new Set<string>() : prev);
                 return;
             }
-            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'c') {
+            if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'c') {
+                if (!e.shiftKey && selBoundsRef.current && !window.getSelection()?.toString()) {
+                    e.preventDefault();
+                    navigator.clipboard.writeText(textSelectionString());
+                    return;
+                }
                 if (e.shiftKey) {
                     if (selectedIdsRef.current.size > 0) {
                         e.preventDefault();
@@ -781,7 +988,7 @@ export function Terminal({
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
-    }, [copySelected, openSearch, stepMatch]);
+    }, [copySelected, openSearch, stepMatch, textSelectionString]);
 
     // Memoize EOL bytes — computed once when eolSequence changes, not per-line
     const eolBytes = useMemo(() => {
@@ -822,7 +1029,11 @@ export function Terminal({
 
     return (
         <div
-            className="flex-grow font-mono text-sm overflow-hidden h-full relative bg-white dark:bg-[#1e1e1e] text-gray-950 dark:text-gray-100 transition-colors duration-200"
+            ref={containerRef}
+            className={clsx(
+                "flex-grow font-mono text-sm overflow-hidden h-full relative bg-white dark:bg-[#1e1e1e] text-gray-950 dark:text-gray-100 transition-colors duration-200",
+                dragSelecting && "select-none",
+            )}
             onContextMenu={handleContextMenu}
         >
             {searchOpen && (
@@ -858,7 +1069,10 @@ export function Terminal({
                 // selection is destroyed. It's a mitigation, not a guarantee — for a selection
                 // that must survive arbitrary scrolling, use gutter-click line selection instead.
                 increaseViewportBy={{ top: 4000, bottom: 4000 }}
-                itemContent={(_, line) => (
+                itemContent={(index, line) => {
+                    const i = index - viewFirst;
+                    const inSel = selBounds !== null && i >= selBounds.startIdx && i <= selBounds.endIdx;
+                    return (
                     <TerminalRow
                         line={line}
                         viewMode={viewMode}
@@ -870,6 +1084,7 @@ export function Terminal({
                         isSelected={selectedIds.has(line.id)}
                         selectedCount={selectedIds.size}
                         confirmedSelectionRef={confirmedSelectionRef}
+                        selectionTsRef={selectionTsRef}
                         onSelectLine={handleSelectLine}
                         onCopySelected={copySelected}
                         onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
@@ -884,8 +1099,11 @@ export function Terminal({
                         onFind={openSearch}
                         searchRe={searchRe}
                         isActiveMatch={searchRe !== null && line.id === activeMatchId}
+                        selStart={inSel ? (i === selBounds.startIdx ? selBounds.startOff : 0) : -1}
+                        selEnd={inSel ? (i === selBounds.endIdx ? selBounds.endOff : Number.MAX_SAFE_INTEGER) : -1}
                     />
-                )}
+                    );
+                }}
                 style={{ height: '100%' }}
             />
 
@@ -930,6 +1148,7 @@ export function Terminal({
                         ] as const : []),
                         ...(confirmedSelectionRef.current ? [
                             { label: 'Copy Text Selection', icon: Copy, onClick: handleCopy },
+                            ...(selectionTsRef.current ? [{ label: 'Copy Text Selection with Timestamps', icon: Clock, onClick: () => navigator.clipboard.writeText(selectionTsRef.current) }] : []),
                         ] as const : []),
                         { label: 'Find… (Ctrl+F)', icon: Search, onClick: openSearch },
                         { label: 'Clear Terminal', icon: Trash, onClick: onClear, variant: 'danger' },

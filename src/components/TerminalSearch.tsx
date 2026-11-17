@@ -16,13 +16,30 @@ export function findRanges(text: string, re: RegExp): Array<[number, number]> {
     return out;
 }
 
-/** Render `text` (which sits at `offset` within the searched string) with
+/** [start, end, className] — sorted, non-overlapping */
+export type StyledRange = [number, number, string];
+
+/** Search matches plus the text selection (which wins where they overlap).
+ *  `selStart < 0` means no selection in this row. */
+export function layerRanges(search: Array<[number, number]>, markClass: string, selStart: number, selEnd: number): StyledRange[] {
+    const hasSel = selStart >= 0 && selEnd > selStart;
+    const out: StyledRange[] = [];
+    for (const [s, e] of search) {
+        if (!hasSel || e <= selStart || s >= selEnd) { out.push([s, e, markClass]); continue; }
+        if (s < selStart) out.push([s, selStart, markClass]);
+        if (e > selEnd) out.push([selEnd, e, markClass]);
+    }
+    if (hasSel) out.push([selStart, selEnd, SELECTION_CLASS]);
+    return out.sort((a, b) => a[0] - b[0]);
+}
+
+/** Render `text` (which sits at `offset` within the row's full text) with
  *  the parts covered by `ranges` wrapped in <mark>. */
-export function highlightText(text: string, ranges: Array<[number, number]>, offset: number, markClass: string): ReactNode {
+export function highlightText(text: string, ranges: StyledRange[], offset: number): ReactNode {
     const end = offset + text.length;
     const out: ReactNode[] = [];
     let pos = offset;
-    for (const [s, e] of ranges) {
+    for (const [s, e, markClass] of ranges) {
         if (e <= pos || s >= end) continue;
         const a = Math.max(s, pos);
         const b = Math.min(e, end);
@@ -36,7 +53,8 @@ export function highlightText(text: string, ranges: Array<[number, number]>, off
 }
 
 export const MATCH_CLASS = 'bg-yellow-300/70 dark:bg-yellow-400/35 text-inherit rounded-sm';
-export const ACTIVE_MATCH_CLASS = 'bg-orange-400/90 dark:bg-orange-500/70 text-inherit rounded-sm';
+export const SELECTION_CLASS = 'bg-blue-500/35 dark:bg-blue-400/40 text-inherit';
+export const ACTIVE_MATCH_CLASS ='bg-orange-400/90 dark:bg-orange-500/70 text-inherit rounded-sm';
 
 interface TerminalSearchBarProps {
     inputRef: RefObject<HTMLInputElement | null>;
