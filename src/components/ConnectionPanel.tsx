@@ -33,12 +33,13 @@ interface ConnectionPanelProps {
     isReconnecting: boolean;
     onConnect: (port: string, baud: number) => void;
     onConnectRemote: (address: string, token: string) => Promise<void>;
+    onCancelConnect: () => void;
     onDisconnect: () => void;
     onOpenSettings: () => void;
 }
 
 export function ConnectionPanel({
-    isConnected, isReconnecting, onConnect, onConnectRemote, onDisconnect, onOpenSettings,
+    isConnected, isReconnecting, onConnect, onConnectRemote, onCancelConnect, onDisconnect, onOpenSettings,
 }: ConnectionPanelProps) {
     const [mode, setMode] = useState<ConnMode>(() => readLocal('oryx_connMode', 'serial'));
     const [remoteAddress, setRemoteAddress] = useState<string>(() => readLocal('oryx_remoteAddress', ''));
@@ -431,12 +432,15 @@ export function ConnectionPanel({
                 </button>
 
                 <button
-                    onClick={() => (isConnected || isReconnecting)
-                        ? onDisconnect()
-                        : mode === 'remote' ? connectRemote() : onConnect(selectedPort, baudRate)}
-                    disabled={connecting || (!isConnected && !isReconnecting && (mode === 'remote' ? !remoteAddress.trim() || !remoteToken.trim() : !selectedPort))}
+                    onClick={() => connecting
+                        ? onCancelConnect()
+                        : (isConnected || isReconnecting)
+                            ? onDisconnect()
+                            : mode === 'remote' ? connectRemote() : onConnect(selectedPort, baudRate)}
+                    disabled={!connecting && !isConnected && !isReconnecting && (mode === 'remote' ? !remoteAddress.trim() || !remoteToken.trim() : !selectedPort)}
+                    title={connecting ? 'Cancel the connection attempt' : undefined}
                     className={`relative flex items-center gap-3 px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg transition-all transform active:scale-95 overflow-hidden group/btn ${isReconnecting || connecting
-                            ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20 disabled:cursor-wait'
+                            ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
                             : isConnected
                                 ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20'
                                 : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20 disabled:opacity-50 disabled:grayscale disabled:cursor-not-allowed'
@@ -450,7 +454,7 @@ export function ConnectionPanel({
                             : <Play size={16} fill="white" strokeWidth={0} />
                     }
                     <span className="relative">
-                        {connecting ? 'Connecting...' : isReconnecting ? 'Stop Reconnecting' : isConnected ? 'Disconnect' : 'Connect'}
+                        {connecting ? 'Connecting... Cancel' : isReconnecting ? 'Stop Reconnecting' : isConnected ? 'Disconnect' : 'Connect'}
                     </span>
                 </button>
             </div>

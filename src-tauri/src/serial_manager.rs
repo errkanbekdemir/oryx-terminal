@@ -511,6 +511,7 @@ pub fn open_port(
 pub fn close_port(state: State<'_, SerialState>, bridge: State<'_, BridgeState>) -> Result<(), String> {
     // Also tears down any remote session or share — the frontend's disconnect,
     // reconnect-timeout and no-auto-reconnect paths all funnel through here.
+    bridge.cancel_connect();
     bridge.stop_remote();
     bridge.stop_share();
 

@@ -34,6 +34,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PEER_SILENCE_LIMIT: Duration = Duration::from_secs(15);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
+const CONNECT_CANCELLED: &str = "Connection cancelled";
 
 // Outer frame types (cleartext header byte)
 const F_HELLO: u8 = 0x01;
@@ -244,9 +245,17 @@ struct RemoteHandle {
 pub struct BridgeState {
     share: Mutex<Option<ShareHandle>>,
     remote: Mutex<Option<RemoteHandle>>,
+    /// Set while connect_remote's handshake is in flight, so it can be aborted
+    connecting: Mutex<Option<watch::Sender<bool>>>,
 }
 
 impl BridgeState {
+    pub fn cancel_connect(&self) {
+        if let Some(tx) = self.connecting.lock().ok().and_then(|mut g| g.take()) {
+            let _ = tx.send(true);
+        }
+    }
+
     pub fn is_remote_active(&self) -> bool {
         self.remote.lock().map(|g| g.is_some()).unwrap_or(false)
     }
@@ -620,7 +629,21 @@ pub async fn connect_remote(
         return Err(format!("Token must be {TOKEN_LEN} characters (e.g. ABCD-EFGH-JKLM-NPQR)"));
     }
     let address = normalize_address(&address);
-    let (ws, ch, info) = client_handshake(&address, &token).await?;
+
+    // Unreachable hosts can take the full handshake timeout — let close_port abort it
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    *bridge.connecting.lock().map_err(|e| e.to_string())? = Some(cancel_tx);
+    let result = tokio::select! {
+        r = client_handshake(&address, &token) => r,
+        _ = cancel_rx.changed() => Err(CONNECT_CANCELLED.to_string()),
+    };
+    if let Ok(mut g) = bridge.connecting.lock() { *g = None; }
+    let (mut ws, ch, info) = result?;
+    // Cancel landed between handshake completion and here
+    if *cancel_rx.borrow() {
+        let _ = ws.close(None).await;
+        return Err(CONNECT_CANCELLED.into());
+    }
 
     let (tx, rx) = mpsc::unbounded_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);

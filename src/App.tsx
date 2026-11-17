@@ -33,7 +33,7 @@ const getTimestamp = () => {
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0')}`;
 };
 
-function formatLogLine(type: 'rx' | 'tx', bytes: number[], viewMode: string): string {
+function formatLogLine(type: 'rx' | 'tx', bytes: number[], viewMode: string, timestamp: string = getTimestamp()): string {
   let formatted: string;
   switch (viewMode) {
     case 'hex':
@@ -61,8 +61,12 @@ function formatLogLine(type: 'rx' | 'tx', bytes: number[], viewMode: string): st
       }).join('');
       break;
   }
-  return `[${getTimestamp()}] ${type.toUpperCase()}  ${formatted}\n`;
+  return `[${timestamp}] ${type.toUpperCase()}  ${formatted}\n`;
 }
+
+// An RX line still waiting for its EOL is shown early but kept "open"; past
+// this size it is closed anyway so a stream with no EOL can't grow one line forever.
+const MAX_OPEN_LINE = 4096;
 
 // Hard cap on raw RX bytes awaiting flush — beyond this the oldest bytes are
 // dropped so a stalled flush (e.g. slow log write) can't grow memory unbounded.
@@ -83,6 +87,15 @@ const generateLogPath = async (): Promise<string> => {
 interface TerminalBuffer {
   lines: LogEntry[];
   trimmed: number;
+}
+
+function pushLine(prev: TerminalBuffer, entry: LogEntry, max: number): TerminalBuffer {
+  const next = [...prev.lines, entry];
+  if (next.length > max) {
+    const overflow = next.length - max;
+    return { lines: next.slice(overflow), trimmed: prev.trimmed + overflow };
+  }
+  return { lines: next, trimmed: prev.trimmed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,25 +260,26 @@ function App() {
     };
   }, [isResizing, setMacroWidth]);
 
-  const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]) => {
+  const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]): LogEntry => {
     const ansiStart = ansiStateRef.current;
     ansiStateRef.current = parseAnsi(text, ansiStart).state;
     const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData, ansiStart };
-    setTermBuf(prev => {
-      const next = [...prev.lines, entry];
-      const max = maxLinesRef.current;
-      if (next.length > max) {
-        const overflow = next.length - max;
-        return { lines: next.slice(overflow), trimmed: prev.trimmed + overflow };
-      }
-      return { lines: next, trimmed: prev.trimmed };
-    });
+    setTermBuf(prev => pushLine(prev, entry, maxLinesRef.current));
+    return entry;
   }, []);
+
+  // The RX line currently on screen without its EOL. Its bytes stay at the
+  // head of bufferRef until the line completes, so break detection always
+  // sees the whole line (an EOL split across flushes still matches).
+  const openRxRef = useRef<{ id: string; ansiStart: AnsiState; timestamp: string; shown: number } | null>(null);
 
   // ─── Buffer flush ─────────────────────────────────────────────────────────
   // useCallback with stable deps (all reads go through refs) prevents stale closures
   // and ensures the setInterval always calls the same function reference.
-  const flushBuffer = useCallback(async (force: boolean = false) => {
+  // 'wait': only emit complete lines. 'partial': also show an incomplete
+  // trailing line (RX idle) but keep it open. 'complete': close it (break
+  // timeout, disconnect).
+  const flushBuffer = useCallback(async (mode: 'wait' | 'partial' | 'complete' = 'wait') => {
     if (bufferRef.current.length === 0) return;
 
     // Guard: prevent concurrent async flushes (e.g. when log_to_file awaits > 16ms)
@@ -358,32 +372,58 @@ function App() {
 
       // Process segments + collect log lines
       const logLines: string[] = [];
-      let lastIndex = 0;
-      if (uniqueBreakPoints.length > 0) {
-        for (const breakPoint of uniqueBreakPoints) {
-          if (breakPoint > lastIndex && breakPoint <= data.length) {
-            const segment = data.slice(lastIndex, breakPoint);
-            addLog(new TextDecoder().decode(segment), 'rx', Array.from(segment));
-            if (isLoggingRef.current) logLines.push(formatLogLine('rx', Array.from(segment), currentViewMode));
-            lastIndex = breakPoint;
+
+      // Show `bytes` as RX. Updates the open line in place if there is one;
+      // `keepOpen` leaves it open for more bytes, otherwise it's finished
+      // and written to the log file (stamped with the time the line began).
+      const showRx = (bytes: number[], keepOpen: boolean) => {
+        const text = new TextDecoder().decode(Uint8Array.from(bytes));
+        const open = openRxRef.current;
+        if (open) {
+          ansiStateRef.current = parseAnsi(text, open.ansiStart).state;
+          const updated: LogEntry = { id: open.id, timestamp: open.timestamp, type: 'rx', text, originalData: bytes, ansiStart: open.ansiStart };
+          setTermBuf(prev => {
+            // Usually the last line, but TX/system lines may have landed after it
+            for (let i = prev.lines.length - 1; i >= Math.max(0, prev.lines.length - 64); i--) {
+              if (prev.lines[i].id === open.id) {
+                const lines = prev.lines.slice();
+                lines[i] = updated;
+                return { lines, trimmed: prev.trimmed };
+              }
+            }
+            return pushLine(prev, updated, maxLinesRef.current); // cleared/trimmed meanwhile
+          });
+          openRxRef.current = keepOpen ? { ...open, shown: bytes.length } : null;
+          if (!keepOpen && isLoggingRef.current) logLines.push(formatLogLine('rx', bytes, currentViewMode, open.timestamp));
+        } else {
+          const entry = addLog(text, 'rx', bytes);
+          if (keepOpen) {
+            openRxRef.current = { id: entry.id, ansiStart: entry.ansiStart ?? DEFAULT_ANSI_STATE, timestamp: entry.timestamp, shown: bytes.length };
+          } else if (isLoggingRef.current) {
+            logLines.push(formatLogLine('rx', bytes, currentViewMode, entry.timestamp));
           }
         }
-        const remaining = data.slice(lastIndex);
-        if (force && remaining.length > 0) {
-          addLog(new TextDecoder().decode(remaining), 'rx', Array.from(remaining));
-          if (isLoggingRef.current) logLines.push(formatLogLine('rx', Array.from(remaining), currentViewMode));
-          // remaining is consumed; keep any bytes that arrived during the await
-        } else if (remaining.length > 0) {
-          // Prepend unprocessed bytes before any new bytes that arrived during await
-          bufferRef.current = [...Array.from(remaining), ...bufferRef.current];
+      };
+
+      let lastIndex = 0;
+      for (const breakPoint of uniqueBreakPoints) {
+        if (breakPoint > lastIndex && breakPoint <= data.length) {
+          showRx(Array.from(data.slice(lastIndex, breakPoint)), false);
+          lastIndex = breakPoint;
         }
-      } else if (force) {
-        addLog(new TextDecoder().decode(data), 'rx', Array.from(data));
-        if (isLoggingRef.current) logLines.push(formatLogLine('rx', Array.from(data), currentViewMode));
-        // all data consumed; keep any bytes that arrived during the await
-      } else {
-        // No breakpoints and not forced: restore data before any new bytes
-        bufferRef.current = [...Array.from(data), ...bufferRef.current];
+      }
+      const remaining = Array.from(data.slice(lastIndex));
+      if (remaining.length > 0) {
+        if (mode === 'complete' || remaining.length >= MAX_OPEN_LINE) {
+          showRx(remaining, false);
+        } else {
+          if (mode === 'partial' && remaining.length !== openRxRef.current?.shown) {
+            showRx(remaining, true);
+          }
+          // Not consumed: stays ahead of any bytes that arrived meanwhile,
+          // to be re-evaluated (and the open line updated) on the next flush
+          bufferRef.current = [...remaining, ...bufferRef.current];
+        }
       }
 
       // Batch write formatted log lines
@@ -449,6 +489,7 @@ function App() {
 
   // ─── Disconnect / reconnect listeners ─────────────────────────────────────
   useTauriEvent('serial-disconnected', () => {
+    flushBuffer('complete'); // close a pending partial line before the notice
     setIsConnected(false);
     ansiStateRef.current = DEFAULT_ANSI_STATE;
     addLog('[DISCONNECTED] Port unexpectedly closed.', 'error');
@@ -514,23 +555,21 @@ function App() {
 
       if (breakModeRef.current === 'timeout' && bufferRef.current.length > 0) {
         if (now - lastReceiveTime.current > breakAfterTimeoutMsRef.current) {
-          flushBuffer(true);
+          flushBuffer('complete');
           return;
         }
       }
 
       if (bufferRef.current.length > 0) {
-        // An incomplete line (no matching EOL yet) is force-flushed once RX
-        // has been idle this long — was 1000ms for text mode specifically,
-        // which made any data not ending in the configured EOL sequence sit
-        // for a full second before appearing at all.
-        const forceFlushTimeout = 50;
-        const isStale = now - lastReceiveTime.current > forceFlushTimeout;
-        // Cap: force-flush if buffer exceeds 64 KB regardless of idle time.
-        // Prevents unbounded growth when data streams continuously without
-        // matching the EOL/break sequence (e.g. wrong EOL config in text mode).
-        const isOversize = bufferRef.current.length > 65536;
-        flushBuffer(isStale || isOversize);
+        // An incomplete line (no matching EOL yet) is shown once RX has been
+        // idle this long, so prompts appear promptly — but as an open line
+        // that the rest of the line is appended to, not a line break.
+        const partialAfterMs = 50;
+        const isStale = now - lastReceiveTime.current > partialAfterMs;
+        // A stream that never matches the EOL/break sequence is still shown
+        // (and the open line closed at MAX_OPEN_LINE) instead of buffering forever.
+        const isOversize = bufferRef.current.length > MAX_OPEN_LINE;
+        flushBuffer(isStale || isOversize ? 'partial' : 'wait');
       }
     }, 16);
     return () => clearInterval(interval);
@@ -540,6 +579,7 @@ function App() {
   const handleClear = useCallback(() => {
     // Fold the cleared lines into `trimmed` so Virtuoso's firstItemIndex stays monotonic
     setTermBuf(prev => ({ lines: [], trimmed: prev.trimmed + prev.lines.length }));
+    openRxRef.current = null;
     ansiStateRef.current = DEFAULT_ANSI_STATE;
     addLog('Logs cleared.', 'system');
   }, [addLog]);
@@ -584,8 +624,14 @@ function App() {
         addLog('[REMOTE] The shared serial port is currently disconnected on the remote side.', 'error');
       }
     } catch (e) {
-      addLog(`Failed to connect to remote: ${e}`, 'error');
+      if (String(e) === 'Connection cancelled') addLog('Connection cancelled.', 'system');
+      else addLog(`Failed to connect to remote: ${e}`, 'error');
     }
+  };
+
+  // close_port also aborts an in-flight remote handshake
+  const handleCancelConnect = () => {
+    invoke('close_port').catch(e => console.error('Failed to cancel connect:', e));
   };
 
   const handleDisconnect = async () => {
@@ -597,6 +643,7 @@ function App() {
     setReconnectElapsed(0);
     try {
       await invoke('close_port');
+      flushBuffer('complete');
       setIsConnected(false);
       ansiStateRef.current = DEFAULT_ANSI_STATE;
       addLog('Disconnected.', 'system');
@@ -662,6 +709,7 @@ function App() {
         isReconnecting={isReconnecting}
         onConnect={handleConnect}
         onConnectRemote={handleConnectRemote}
+        onCancelConnect={handleCancelConnect}
         onDisconnect={handleDisconnect}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
