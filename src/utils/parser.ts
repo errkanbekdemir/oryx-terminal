@@ -1,80 +1,64 @@
+const utf8 = (s: string): number[] => Array.from(new TextEncoder().encode(s));
+
+const BLOCK_BASES: Record<string, { radix: number; digits: RegExp; name: string }> = {
+    h: { radix: 16, digits: /^[0-9a-fA-F]+$/, name: 'hex' },
+    b: { radix: 2,  digits: /^[01]+$/,        name: 'binary' },
+    d: { radix: 10, digits: /^[0-9]+$/,       name: 'decimal' },
+    o: { radix: 8,  digits: /^[0-7]+$/,       name: 'octal' },
+};
+
+/** Split a digit string into whole bytes, left-padding the first one. */
+const splitBytes = (digits: string, perByte: number, radix: number): number[] => {
+    const padded = digits.padStart(Math.ceil(digits.length / perByte) * perByte, '0');
+    const out: number[] = [];
+    for (let k = 0; k < padded.length; k += perByte) out.push(parseInt(padded.substring(k, k + perByte), radix));
+    return out;
+};
+
 /**
  * Parses a user-input string into a byte array.
  *
  * Supported formats:
- *   - C-style hex:    0x4F  or  0x1A2B  (multi-byte)
- *   - C-style binary: 0b01001111
- *   - Block hex:      \h(48 69)
+ *   - Block hex:      \h(48 69)  or  \h(4869)
  *   - Block decimal:  \d(72 105)
  *   - Block binary:   \b(01001000)
  *   - Block octal:    \o(110 151)
  *   - Escape seqs:    \r  \n  \t  \0  \a  \b  \f  \v  \\  \xFF
- *   - Plain text:     encoded as UTF-8 char codes (charCodeAt)
+ *   - Plain text:     encoded as UTF-8 ("0x4F" is plain text — use \h(4F))
+ *
+ * `literal` skips all of the above and sends the text exactly as typed.
+ * Throws on a malformed block (\h(ZZ), \d(300), missing ")").
  */
-export const parseInput = (input: string): number[] => {
+export const parseInput = (input: string, opts: { literal?: boolean } = {}): number[] => {
+    if (opts.literal) return utf8(input);
+
     const bytes: number[] = [];
     let i = 0;
 
     while (i < input.length) {
         const char = input[i];
 
-        // C-style 0x... or 0b...
-        if (char === '0' && i + 1 < input.length) {
-            const next = input[i + 1].toLowerCase();
-            if (next === 'x') {
-                let end = i + 2;
-                while (end < input.length && /[0-9a-fA-F]/.test(input[end])) end++;
-                if (end > i + 2) {
-                    let cleanHex = input.substring(i + 2, end);
-                    if (cleanHex.length % 2 !== 0) cleanHex = '0' + cleanHex;
-                    for (let k = 0; k < cleanHex.length; k += 2) {
-                        bytes.push(parseInt(cleanHex.substring(k, k + 2), 16));
-                    }
-                    i = end;
-                    continue;
-                }
-            } else if (next === 'b') {
-                let end = i + 2;
-                while (end < input.length && /[01]/.test(input[end])) end++;
-                if (end > i + 2) {
-                    const binStr = input.substring(i + 2, end);
-                    const val = parseInt(binStr, 2);
-                    if (val <= 255) {
-                        bytes.push(val);
-                    } else {
-                        const needed = Math.ceil(binStr.length / 8) * 8;
-                        const padded = binStr.padStart(needed, '0');
-                        for (let k = 0; k < padded.length; k += 8) {
-                            bytes.push(parseInt(padded.substring(k, k + 8), 2));
-                        }
-                    }
-                    i = end;
-                    continue;
-                }
-            }
-        }
-
         if (char === '\\') {
             const next = input[i + 1];
 
             // Block parsers: \h(...) \b(...) \d(...) \o(...)
-            if (['h', 'b', 'd', 'o'].includes(next) && input[i + 2] === '(') {
+            const base = BLOCK_BASES[next];
+            if (base && input[i + 2] === '(') {
                 const end = input.indexOf(')', i + 3);
-                if (end !== -1) {
-                    const content = input.substring(i + 3, end);
-                    const tokens = content.split(/[\s,]+/);
-                    tokens.forEach(t => {
-                        if (!t) return;
-                        let val = 0;
-                        if (next === 'h') val = parseInt(t, 16);
-                        else if (next === 'b') val = parseInt(t, 2);
-                        else if (next === 'd') val = parseInt(t, 10);
-                        else if (next === 'o') val = parseInt(t, 8);
-                        if (!isNaN(val)) bytes.push(val & 0xFF);
-                    });
-                    i = end + 1;
-                    continue;
+                if (end === -1) throw new Error(`\\${next}( is missing its closing ")"`);
+                for (const t of input.substring(i + 3, end).split(/[\s,]+/)) {
+                    if (!t) continue;
+                    if (!base.digits.test(t)) throw new Error(`"${t}" is not valid ${base.name}`);
+                    if (next === 'h') bytes.push(...splitBytes(t, 2, 16));
+                    else if (next === 'b') bytes.push(...splitBytes(t, 8, 2));
+                    else {
+                        const val = parseInt(t, base.radix);
+                        if (val > 255) throw new Error(`${base.name} value ${t} does not fit in one byte (max 255)`);
+                        bytes.push(val);
+                    }
                 }
+                i = end + 1;
+                continue;
             }
 
             // Standard C escape sequences
@@ -98,15 +82,10 @@ export const parseInput = (input: string): number[] => {
             }
         }
 
-        // Plain character — encode as actual UTF-8 bytes, not the raw UTF-16
-        // code unit (which is only correct for ASCII and mangles anything
-        // else, e.g. ₺, é, ş). Merge surrogate pairs into one codepoint first
-        // so characters outside the BMP encode correctly too.
-        const codePoint = input.codePointAt(i) ?? char.charCodeAt(0);
-        const fullChar = String.fromCodePoint(codePoint);
-        for (const b of new TextEncoder().encode(fullChar)) {
-            bytes.push(b);
-        }
+        // Plain character as UTF-8; merge surrogate pairs into one codepoint
+        // first so characters outside the BMP encode correctly too.
+        const fullChar = String.fromCodePoint(input.codePointAt(i) ?? char.charCodeAt(0));
+        bytes.push(...utf8(fullChar));
         i += fullChar.length;
     }
 

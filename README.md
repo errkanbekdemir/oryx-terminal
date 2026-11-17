@@ -34,7 +34,7 @@
 - 🎯 **Direct Saving**: One-click "Save to Macro" functionality directly from your command history.
 - 📋 **Flexible Line Breaking**: Break lines based on **Timeout**, **Byte Count**, **Chunks**, or specific **Sequences** — "before" and "after" sequence triggers are independent and combinable, each with its own enable/disable toggle.
 - 📂 **Session Logging**: Robust logging system with automated directory management — a fresh timestamped file is created each time logging starts, and the log folder opens in Finder/Explorer with one click.
-- ⚡ **ESC Sequences**: Full support for escaped characters and C-style strings in TX data (`\h(4F)`, `0x4F`, `\r`, `\n` and more), including a custom line-ending option in the sender.
+- ⚡ **ESC Sequences**: Full support for escaped characters and C-style strings in TX data (`\h(4F)`, `\xFF`, `\r`, `\n` and more), including a custom line-ending option in the sender.
 - 📏 **Configurable Display Limit**: Set the terminal's rolling line buffer from 1,000 to 100,000 lines; auto-scroll keeps following once the cap is reached.
 - ⌨️ **Keyboard Shortcuts**: Press `?` for a full shortcut reference. Shift+Enter / Shift+Click to send without line ending.
 - 🛡️ **Crash Resilient**: Error boundaries prevent a component crash from taking down the whole application.

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Send, Terminal, ChevronDown, Clock, X, BookmarkPlus } from 'lucide-react';
+import { Send, Terminal, ChevronDown, Clock, X, BookmarkPlus, Type } from 'lucide-react';
 import clsx from 'clsx';
 import { Dropdown } from './Dropdown';
 import { parseInput } from '../utils/parser';
@@ -19,6 +19,7 @@ const HISTORY_KEY = 'oryx_sendHistory';
 const LINE_ENDING_KEY = 'oryx_lineEnding';
 const CUSTOM_LINE_ENDING_KEY = 'oryx_customLineEnding';
 const CHECKSUM_KEY = 'oryx_checksumType';
+const ESCAPES_KEY = 'oryx_senderEscapes';
 
 type LineEnding = 'None' | 'CR' | 'LF' | 'CRLF' | 'Custom';
 
@@ -79,15 +80,26 @@ export function Sender({ isConnected, onSend }: SenderProps) {
         saveHistory(next);
     };
 
-    const handleSend = async (raw = false) => {
-        if (!isConnected || !input) return;
+    // Off = send the text exactly as typed (no \h(..) / \r conversion)
+    const [escapes, setEscapes] = useState(() => localStorage.getItem(ESCAPES_KEY) !== 'false');
+    useEffect(() => {
+        localStorage.setItem(ESCAPES_KEY, String(escapes));
+    }, [escapes]);
 
-        const dataBytes = parseInput(input);
+    const inputError = (() => {
+        try { parseInput(input, { literal: !escapes }); return null; } catch (e) { return (e as Error).message; }
+    })();
+
+    const handleSend = async (raw = false) => {
+        if (!isConnected || !input || inputError) return;
+
+        const dataBytes = parseInput(input, { literal: !escapes });
+
+        // Byte order is always [data] → [checksum] → [line ending];
+        // raw (Shift) skips only the line ending.
+        dataBytes.push(...computeChecksum(checksumType, dataBytes));
 
         if (!raw) {
-            const csBytes = computeChecksum(checksumType, dataBytes);
-            dataBytes.push(...csBytes);
-
             if (lineEnding === 'CR')   dataBytes.push(13);
             if (lineEnding === 'LF')   dataBytes.push(10);
             if (lineEnding === 'CRLF') { dataBytes.push(13); dataBytes.push(10); }
@@ -144,7 +156,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                 setHistoryIndex(next);
                 setInput(h[next]);
             }
-        } else if (key === 'escape') {
+        } else if (key === 'escape' && historyIndex !== -1) {
             setHistoryIndex(-1);
             setInput(draftRef.current);
         }
@@ -191,7 +203,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                         value={customEnding}
                         onChange={(e) => setCustomEnding(e.target.value)}
                         placeholder="\r\n"
-                        title="Custom line ending — supports \r, \n, \h(XX), 0x.. (same syntax as the command input)"
+                        title="Custom line ending — supports \r, \n, \h(XX) (same syntax as the command input)"
                         className={clsx(
                             "w-24 bg-gray-100 dark:bg-[#151515] border rounded px-2 py-2 text-xs font-mono text-gray-800 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-600 focus:outline-none focus:ring-1 shadow-inner transition-all",
                             customEndingValid
@@ -220,7 +232,8 @@ export function Sender({ isConnected, onSend }: SenderProps) {
             <div className="flex-grow min-w-0 relative flex flex-col group/input">
                 <label className="text-[8px] uppercase font-bold text-gray-500 tracking-wider mb-0.5 ml-1">
                     Data / Command
-                    {historyRef.current.length > 0 && (
+                    {inputError && <span className="ml-2 normal-case font-normal text-red-500">{inputError}</span>}
+                    {!inputError && historyRef.current.length > 0 && (
                         <span className="ml-2 normal-case text-[8px] font-normal italic">
                             {isBrowsingHistory
                                 ? <span className="text-amber-500">&#8593;&#8595; history ({historyIndex + 1}/{historyRef.current.length})</span>
@@ -230,20 +243,34 @@ export function Sender({ isConnected, onSend }: SenderProps) {
                     )}
                 </label>
                 <div className="relative w-full">
-                    <div className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-600 pointer-events-none">
-                        <Terminal size={13} />
-                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setEscapes(!escapes)}
+                        className={clsx(
+                            "absolute left-1 top-1/2 -translate-y-1/2 p-1.5 rounded transition-colors",
+                            escapes
+                                ? "text-blue-500 hover:bg-blue-500/10"
+                                : "text-gray-400 dark:text-gray-600 hover:bg-gray-200 dark:hover:bg-white/10"
+                        )}
+                        title={escapes
+                            ? "Escapes ON: \\h(48 69), \\r, \\n are converted to bytes — click to send text exactly as typed"
+                            : "Plain text: sent exactly as typed — click to enable escapes (\\h(48 69), \\r, \\n)"}
+                    >
+                        {escapes ? <Terminal size={13} /> : <Type size={13} />}
+                    </button>
                     <input
                         type="text"
                         value={input}
                         onChange={(e) => { setHistoryIndex(-1); setInput(e.target.value); }}
                         onKeyDown={handleKeyDown}
                         disabled={!isConnected}
-                        placeholder={isConnected ? "Try: \\h(48 69) or 0x4F" : "Connect to send"}
+                        placeholder={!isConnected ? "Connect to send" : escapes ? "Try: \\h(48 69) or PING\\r\\n" : "Plain text — sent exactly as typed"}
                         className={clsx(
                             "w-full bg-gray-100 dark:bg-[#151515] border rounded pl-8 py-2 text-sm text-gray-800 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-600 focus:outline-none focus:ring-1 disabled:opacity-50 disabled:cursor-not-allowed font-mono shadow-inner transition-all",
                             historyRef.current.length > 0 ? "pr-14" : "pr-4",
-                            isBrowsingHistory
+                            inputError
+                                ? "border-red-400 dark:border-red-600 focus:border-red-500 focus:ring-red-500"
+                                : isBrowsingHistory
                                 ? "border-amber-400 dark:border-amber-600 focus:border-amber-400 focus:ring-amber-400"
                                 : "border-gray-300 dark:border-gray-600 focus:border-blue-500 focus:ring-blue-500"
                         )}
@@ -317,7 +344,7 @@ export function Sender({ isConnected, onSend }: SenderProps) {
 
             <button
                 onClick={(e) => handleSend(e.shiftKey)}
-                disabled={!isConnected || !input}
+                disabled={!isConnected || !input || !!inputError}
                 className="mt-4 p-2.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95 shadow-lg flex-shrink-0"
                 title="Send (Enter) · Shift+Click or Shift+Enter to send without EOL"
             >

@@ -20,7 +20,6 @@ export interface Macro {
 // ending escape keep their exact bytes; plain text gets CRLF.
 const inferLineEnding = (command: string): MacroLineEnding => {
     if (/\\[hbdo]\(|\\x[0-9a-fA-F]/.test(command)) return 'None';
-    if (/(^|\s)0[xXbB][0-9a-fA-F]/.test(command)) return 'None';
     if (/(\\r|\\n)$/.test(command)) return 'None';
     return 'CRLF';
 };
@@ -45,9 +44,9 @@ export function MacroPanel({ onRun, isConnected }: MacroPanelProps) {
         }
         // Defaults if nothing saved or error
         return withLineEndingDefaults([
-            { id: '1', name: 'Ping', command: 'PING\r\n', color: 'blue' },
-            { id: '2', name: 'Version', command: 'VER?\n', color: 'green' },
-            { id: '3', name: 'Reset', command: '\h(AA 55 00)', color: 'red' },
+            { id: '1', name: 'Ping', command: 'PING\\r\\n', color: 'blue' },
+            { id: '2', name: 'Version', command: 'VER?\\n', color: 'green' },
+            { id: '3', name: 'Reset', command: '\\h(AA 55 00)', color: 'red' },
         ]);
     });
     const [isEditing, setIsEditing] = useState<string | null>(null); // ID of macro being edited, or 'new'

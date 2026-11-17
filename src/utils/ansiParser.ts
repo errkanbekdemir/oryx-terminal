@@ -109,6 +109,10 @@ export function parseAnsi(text: string, initial: AnsiState = DEFAULT_ANSI_STATE)
                 currentBg = colorMap[code];
             } else if (code >= 100 && code <= 107) {
                 currentBg = colorMap[code];
+            } else if (code === 22) {
+                currentBold = false;
+            } else if (code === 24) {
+                currentUnderline = false;
             } else if (code === 39) {
                 currentFg = undefined;
             } else if (code === 49) {

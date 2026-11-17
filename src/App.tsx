@@ -90,8 +90,8 @@ interface TerminalBuffer {
   trimmed: number;
 }
 
-function pushLine(prev: TerminalBuffer, entry: LogEntry, max: number): TerminalBuffer {
-  const next = [...prev.lines, entry];
+function pushLines(prev: TerminalBuffer, entries: LogEntry[], max: number): TerminalBuffer {
+  const next = [...prev.lines, ...entries];
   if (next.length > max) {
     const overflow = next.length - max;
     return { lines: next.slice(overflow), trimmed: prev.trimmed + overflow };
@@ -261,11 +261,20 @@ function App() {
     };
   }, [isResizing, setMacroWidth]);
 
+  const pendingLinesRef = useRef<LogEntry[]>([]);
   const addLog = useCallback((text: string, type: LogEntry['type'], originalData?: number[]): LogEntry => {
     const ansiStart = ansiStateRef.current;
     ansiStateRef.current = parseAnsi(text, ansiStart).state;
     const entry: LogEntry = { id: generateId(), timestamp: getTimestamp(), type, text, originalData, ansiStart };
-    setTermBuf(prev => pushLine(prev, entry, maxLinesRef.current));
+    // One state update per burst instead of one array copy per line —
+    // with a large display limit, per-line copies made fast streams crawl.
+    pendingLinesRef.current.push(entry);
+    if (pendingLinesRef.current.length === 1) {
+      queueMicrotask(() => {
+        const batch = pendingLinesRef.current.splice(0);
+        if (batch.length > 0) setTermBuf(prev => pushLines(prev, batch, maxLinesRef.current));
+      });
+    }
     return entry;
   }, []);
 
@@ -385,7 +394,9 @@ function App() {
         if (open) {
           ansiStateRef.current = parseAnsi(text, open.ansiStart).state;
           const updated: LogEntry = { id: open.id, timestamp: open.timestamp, type: 'rx', text, originalData: bytes, ansiStart: open.ansiStart };
-          setTermBuf(prev => {
+          const queued = pendingLinesRef.current.findIndex(l => l.id === open.id);
+          if (queued !== -1) pendingLinesRef.current[queued] = updated; // not in state yet
+          else setTermBuf(prev => {
             // Usually the last line, but TX/system lines may have landed after it
             for (let i = prev.lines.length - 1; i >= Math.max(0, prev.lines.length - 64); i--) {
               if (prev.lines[i].id === open.id) {
@@ -394,7 +405,7 @@ function App() {
                 return { lines, trimmed: prev.trimmed };
               }
             }
-            return pushLine(prev, updated, maxLinesRef.current); // cleared/trimmed meanwhile
+            return pushLines(prev, [updated], maxLinesRef.current); // cleared/trimmed meanwhile
           });
           openRxRef.current = keepOpen ? { ...open, shown: bytes.length } : null;
           if (!keepOpen && isLoggingRef.current) logLines.push(formatLogLine('rx', bytes, currentViewMode, open.timestamp));
@@ -581,6 +592,7 @@ function App() {
   // ─── Global keyboard shortcuts ────────────────────────────────────────────
   const handleClear = useCallback(() => {
     // Fold the cleared lines into `trimmed` so Virtuoso's firstItemIndex stays monotonic
+    pendingLinesRef.current.length = 0;
     setTermBuf(prev => ({ lines: [], trimmed: prev.trimmed + prev.lines.length }));
     openRxRef.current = null;
     ansiStateRef.current = DEFAULT_ANSI_STATE;
@@ -658,7 +670,13 @@ function App() {
       addLog('Cannot send: Not connected.', 'error');
       return false;
     }
-    const dataBytes = parseInput(command);
+    let dataBytes: number[];
+    try {
+      dataBytes = parseInput(command);
+    } catch (e) {
+      addLog(`Cannot send "${command}": ${(e as Error).message}`, 'error');
+      return false;
+    }
     if (lineEnding === 'CR') dataBytes.push(13);
     else if (lineEnding === 'LF') dataBytes.push(10);
     else if (lineEnding === 'CRLF') dataBytes.push(13, 10);
@@ -680,7 +698,8 @@ function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
-      if (e.ctrlKey && key === 'l') {
+      const mod = e.ctrlKey || e.metaKey; // ⌘ on macOS
+      if (mod && key === 'l') {
         e.preventDefault();
         handleClear();
       } else if (key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -688,8 +707,8 @@ function App() {
         if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
           setIsHelpOpen(true);
         }
-      } else if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
-        // Check for macro hotkeys (Ctrl+1 through Ctrl+9)
+      } else if (mod && !e.altKey && !e.shiftKey) {
+        // Check for macro hotkeys (Ctrl/⌘+1 through 9)
         const hotkeyNum = parseInt(key, 10);
         if (hotkeyNum >= 1 && hotkeyNum <= 9) {
           e.preventDefault();
