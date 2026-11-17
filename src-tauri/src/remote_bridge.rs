@@ -496,11 +496,37 @@ async fn serve_client(
     let info_json = serde_json::to_vec(&info).unwrap_or_default();
     if send_binary(&mut ws, ch.seal(M_INFO, &info_json)).await.is_ok() {
         // ── Session ──
+        // Serial writes run in their own task: a write takes as long as the
+        // line rate allows, and doing it inline starved the RX forwarding
+        // below until the broadcast backlog overflowed (lost loopback data
+        // at 921600 baud under sustained remote TX).
+        let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(16);
+        let writer_app = app.clone();
+        let writer_bytes_in = bytes_in.clone();
+        tauri::async_runtime::spawn(async move {
+            let serial = writer_app.state::<SerialState>();
+            while let Some(payload) = writer_rx.recv().await {
+                writer_bytes_in.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                // Same path as local TX so flow control / RS-485 keying apply
+                match send_data_inner(payload.clone(), &serial).await {
+                    Ok(()) => { writer_app.emit("remote-tx", Payload { data: payload }).ok(); }
+                    Err(e) => eprintln!("share: remote TX failed: {e}"),
+                }
+            }
+        });
+        // A frame waiting for room in the writer queue. While it waits the
+        // socket isn't read, which pushes back on the client through TCP.
+        let mut pending: Option<Vec<u8>> = None;
+
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         let mut last_seen = Instant::now();
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
+                permit = writer_tx.reserve(), if pending.is_some() => match permit {
+                    Ok(permit) => permit.send(pending.take().expect("guarded by is_some")),
+                    Err(_) => break,
+                },
                 r = rx.recv() => match r {
                     Ok(bytes) => {
                         bytes_out.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -515,19 +541,12 @@ async fn serve_client(
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
-                m = ws.next() => match m {
+                m = ws.next(), if pending.is_none() => match m {
                     Some(Ok(Message::Binary(b))) => {
                         last_seen = Instant::now();
                         let Ok((kind, payload)) = ch.open(&b) else { break };
                         match kind {
-                            M_DATA => {
-                                bytes_in.fetch_add(payload.len() as u64, Ordering::Relaxed);
-                                // Same path as local TX so flow control / RS-485 keying apply
-                                match send_data_inner(payload.clone(), &serial).await {
-                                    Ok(()) => { app.emit("remote-tx", Payload { data: payload }).ok(); }
-                                    Err(e) => eprintln!("share: remote TX failed: {e}"),
-                                }
-                            }
+                            M_DATA => pending = Some(payload),
                             M_PING => { if send_binary(&mut ws, ch.seal(M_PONG, &[])).await.is_err() { break; } }
                             _ => {}
                         }
@@ -536,7 +555,8 @@ async fn serve_client(
                     Some(Ok(_)) => last_seen = Instant::now(),
                 },
                 _ = tick.tick() => {
-                    if last_seen.elapsed() > PEER_SILENCE_LIMIT { break; }
+                    // Not reading the socket while a frame is pending, so silence proves nothing then
+                    if pending.is_none() && last_seen.elapsed() > PEER_SILENCE_LIMIT { break; }
                     let (_, _, now_alive) = serial_snapshot(&serial);
                     if now_alive != alive {
                         alive = now_alive;
