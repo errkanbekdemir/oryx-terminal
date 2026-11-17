@@ -35,3 +35,4 @@ local/app_icon2.png
 CLAUDE.md
 .claude
 
+__pycache__/
