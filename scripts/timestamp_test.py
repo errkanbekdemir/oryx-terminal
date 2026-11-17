@@ -50,7 +50,7 @@ DEV_LINE, DEV_LINES, DEV_BURSTS, DEV_PAUSE_S = 40, 30, 4, 0.8
 
 def line(tag: str, group: int, n: int, size: int) -> bytes:
     head = f"{tag} {group} {n:03d} ".encode()
-    filler = (b"abcdefghijklmnopqrstuvwxyz" * 4)[: size - len(head) - 2]
+    filler = (b"abcdefghijklmnopqrstuvwxyz" * (size // 26 + 1))[: size - len(head) - 2]
     return head + filler + b"\r\n"
 
 
