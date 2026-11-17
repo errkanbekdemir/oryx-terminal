@@ -280,7 +280,8 @@ fn spawn_read_thread(
     rx_tap: tokio::sync::broadcast::Sender<Payload>,
 ) {
     thread::spawn(move || {
-        let mut buf = vec![0u8; 1000];
+        // Large enough to empty the driver's queue in one call at high baud rates
+        let mut buf = vec![0u8; 4096];
         // start bit + data bits + parity bit + stop bits
         let frame_bits = 1 + params.data_bits as u32
             + u32::from(!params.parity.eq_ignore_ascii_case("none"))
@@ -659,9 +660,13 @@ fn schedule_rts_release(
 /// draining; give up only after 2 s with no progress at all.
 fn write_all_patient(port: &mut dyn SerialPort, mut data: &[u8]) -> std::io::Result<()> {
     const STALL_LIMIT: Duration = Duration::from_secs(2);
+    // Hand the driver modest slices rather than one huge buffer: a single
+    // 11 KB write at 921600 baud lost looped-back RX on Windows, while the
+    // same volume in 512-byte writes was clean over 1 MB.
+    const SLICE: usize = 512;
     let mut last_progress = std::time::Instant::now();
     while !data.is_empty() {
-        match port.write(data) {
+        match port.write(&data[..data.len().min(SLICE)]) {
             Ok(n) if n > 0 => {
                 data = &data[n..];
                 last_progress = std::time::Instant::now();

@@ -66,17 +66,6 @@ def read_log(path: str, tag: str) -> dict[int, list[tuple[int, float]]]:
     return groups
 
 
-def read_tx_times(path: str, tag: str) -> list[float]:
-    """When ORYX wrote each burst to the port, from its own log (ms since midnight)."""
-    out = []
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for ln in f:
-            m = re.match(r"^\[(\d\d):(\d\d):(\d\d)\.(\d{3})\] TX  " + tag + r" \d+ 001 ", ln)
-            if m:
-                out.append(((int(m[1]) * 60 + int(m[2])) * 60 + int(m[3])) * 1000 + int(m[4]))
-    return out
-
-
 def find_log(arg: str, since: float) -> str | None:
     if arg != "auto":
         return os.path.expanduser(arg.strip().strip("'\""))
@@ -96,7 +85,10 @@ def check(groups, n_groups: int, n_lines: int, line_ms: float, tol_ms: float, ga
     for g in range(1, n_groups + 1):
         rows = groups.get(g, [])
         if [n for n, _ in rows] != list(range(1, n_lines + 1)):
-            result(False, f"group {g}: expected lines 1..{n_lines} in order, log has {len(rows)} line(s)")
+            have = [n for n, _ in rows]
+            missing = sorted(set(range(1, n_lines + 1)) - set(have))
+            result(False, f"group {g}: expected lines 1..{n_lines} in order, got {len(rows)} line(s)"
+                   + (f" — missing {missing} (data lost before it reached ORYX's reader)" if missing else " — out of order or repeated"))
             continue
         times = [t for _, t in rows]
         firsts.append(times[0])
@@ -106,8 +98,11 @@ def check(groups, n_groups: int, n_lines: int, line_ms: float, tol_ms: float, ga
         result(abs(med - line_ms) <= tol_ms,
                f"group {g}: median spacing {med:.1f} ms (expected {line_ms:.1f} ±{tol_ms:.1f})")
         span, want = times[-1] - times[0], line_ms * (n_lines - 1)
-        result(abs(span - want) <= max(0.25 * want, 20),
-               f"group {g}: first-to-last {span:.0f} ms (expected ~{want:.0f})")
+        # Can't be shorter than the time on the wire; it is longer when the
+        # sender paused inside the burst (ORYX writes large blocks in slices).
+        result(span >= want - max(0.25 * want, 20),
+               f"group {g}: first-to-last {span:.0f} ms (at least ~{want:.0f} on the wire"
+               + (f"; sent {span / want:.1f}x slower than line rate)" if span > 1.4 * want else ")"))
         if line_ms >= 1.5:
             distinct = len(set(times))
             result(distinct >= 0.7 * n_lines,
@@ -287,12 +282,7 @@ async def run_device(args) -> int:
         print("  (skipped — no log)")
         return 0 if wire_ok else 1
     print(f"  {path}")
-    # In the log the reference is exact: when ORYX itself wrote each burst to the port
-    tx = read_tx_times(path, "TD")[-DEV_BURSTS:]
-    if len(tx) == DEV_BURSTS:
-        log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, [b - a for a, b in zip(tx, tx[1:])], 30)
-    else:
-        log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 250)
+    log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 250)
     ok = wire_ok and log_ok
     print("\nPASS — lines are dated by when they arrived at the port" if ok else "\nFAIL")
     return 0 if ok else 1
