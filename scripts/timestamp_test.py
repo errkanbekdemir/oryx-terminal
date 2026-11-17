@@ -66,6 +66,17 @@ def read_log(path: str, tag: str) -> dict[int, list[tuple[int, float]]]:
     return groups
 
 
+def read_tx_times(path: str, tag: str) -> list[float]:
+    """When ORYX wrote each burst to the port, from its own log (ms since midnight)."""
+    out = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            m = re.match(r"^\[(\d\d):(\d\d):(\d\d)\.(\d{3})\] TX  " + tag + r" \d+ 001 ", ln)
+            if m:
+                out.append(((int(m[1]) * 60 + int(m[2])) * 60 + int(m[3])) * 1000 + int(m[4]))
+    return out
+
+
 def find_log(arg: str, since: float) -> str | None:
     if arg != "auto":
         return os.path.expanduser(arg.strip().strip("'\""))
@@ -266,7 +277,9 @@ async def run_device(args) -> int:
             sizes = sorted(len(d) for _, _, d in chunks)
             print(f"  ({len(chunks)} reads, {sizes[0]}-{sizes[-1]} bytes each, {chunks[0][1]:.3f} ms/byte"
                   + (f", {untimed} without a time" if untimed else "") + ")")
-            wire_ok = check(wire_groups(chunks), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 60)
+            # Burst-to-burst spacing is compared with when this script sent them, which
+            # includes network delivery jitter — hence the loose tolerance here.
+            wire_ok = check(wire_groups(chunks), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 250)
 
         print("\n2) Timestamps in the sharing ORYX's log (what its screen shows):")
         path = await get_log(args.log, started)
@@ -274,7 +287,12 @@ async def run_device(args) -> int:
         print("  (skipped — no log)")
         return 0 if wire_ok else 1
     print(f"  {path}")
-    log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 60)
+    # In the log the reference is exact: when ORYX itself wrote each burst to the port
+    tx = read_tx_times(path, "TD")[-DEV_BURSTS:]
+    if len(tx) == DEV_BURSTS:
+        log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, [b - a for a, b in zip(tx, tx[1:])], 30)
+    else:
+        log_ok = check(read_log(path, "TD"), DEV_BURSTS, DEV_LINES, line_ms, tol, gaps, 250)
     ok = wire_ok and log_ok
     print("\nPASS — lines are dated by when they arrived at the port" if ok else "\nFAIL")
     return 0 if ok else 1
